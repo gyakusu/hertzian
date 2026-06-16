@@ -42,8 +42,12 @@ dev = [
 [tool.maturin]
 python-source = "python"
 module-name = "hertzian._core"
-# `extension-module` is enabled only for wheel builds (not for `cargo test`).
-features = ["pyo3/extension-module"]
+# These features apply to maturin builds only, never to `cargo test`/`clippy`
+# (which link libpython directly):
+#   - `extension-module` builds a Python extension rather than an embedding.
+#   - `abi3-py311` targets the stable ABI, so a single `cp311-abi3` wheel works
+#     on CPython 3.11+ (matching `requires-python`).
+features = ["pyo3/extension-module", "pyo3/abi3-py311"]
 strip = true
 
 # ---------------------------------------------------------------------------

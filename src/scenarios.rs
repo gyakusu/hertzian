@@ -4,6 +4,8 @@
 //! the free-space DC-FFT operator, and the problem for a named geometry, then
 //! solve in one call.
 
+use ndarray::Array2;
+
 use crate::geometry::{Gap, Paraboloid, Torus};
 use crate::grid::Grid;
 use crate::influence::FreeSpaceBoussinesq;
@@ -12,6 +14,29 @@ use crate::problem::{Control, Problem};
 use crate::solution::Solution;
 use crate::solver::{Bccg, Config, Solver};
 use crate::validation::HertzCircular;
+
+/// Solves the contact for a gap already sampled on `grid`.
+///
+/// The free-space DC-FFT path shared by every scenario: build the operator on
+/// `grid`, assemble the load-controlled problem, and run the BCCG solver. The
+/// analytic-shortcut constructors below all funnel through here after sampling
+/// their gap, and the Python height-field entry point reuses it directly with a
+/// caller-supplied gap array (design §8.5).
+///
+/// # Panics
+/// Panics if `gap`'s shape does not match `grid` (see [`Problem::new`]).
+#[must_use]
+pub fn solve_sampled_gap(
+    gap: Array2<f64>,
+    material: Material,
+    load: f64,
+    grid: Grid,
+    config: Config,
+) -> Solution {
+    let operator = FreeSpaceBoussinesq::new(grid.clone(), material.e_star());
+    let problem = Problem::new(grid, gap, Control::Load(load));
+    Bccg::new(config).solve(&problem, &operator)
+}
 
 /// Solves the contact for an arbitrary gap on a prepared grid.
 #[must_use]
@@ -22,10 +47,7 @@ pub fn solve_gap(
     grid: Grid,
     config: Config,
 ) -> Solution {
-    let sampled = gap.sample(&grid);
-    let operator = FreeSpaceBoussinesq::new(grid.clone(), material.e_star());
-    let problem = Problem::new(grid, sampled, Control::Load(load));
-    Bccg::new(config).solve(&problem, &operator)
+    solve_sampled_gap(gap.sample(&grid), material, load, grid, config)
 }
 
 /// Solves a sphere of radius `radius` pressed onto a flat.
@@ -83,8 +105,8 @@ pub fn sphere_on_torus(
 
 #[cfg(test)]
 mod tests {
-    use super::{sphere_on_flat, sphere_on_sphere, sphere_on_torus};
-    use crate::geometry::Torus;
+    use super::{solve_sampled_gap, sphere_on_flat, sphere_on_sphere, sphere_on_torus};
+    use crate::geometry::{Gap, Paraboloid, Torus};
     use crate::grid::Grid;
     use crate::material::Material;
     use crate::solver::Config;
@@ -157,6 +179,49 @@ mod tests {
             "peak pressure",
         );
         assert_relative(solution.approach(), hertz.approach(), 0.04, "approach");
+    }
+
+    #[test]
+    fn presampled_gap_matches_the_sphere_shortcut() {
+        // The height-field path (used by the Python `solve_height_field`
+        // binding) must reproduce the analytic shortcut when handed the same
+        // gap the shortcut would sample internally.
+        let radius = 10.0e-3;
+        let load = 50.0;
+        let material = Material::from_e_star(70.0e9);
+        let hertz = HertzCircular::new(radius, load, material.e_star());
+        let grid = centred_grid(128, 3.0 * hertz.contact_radius());
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 5_000,
+        };
+
+        let gap = Paraboloid::sphere(radius).sample(&grid);
+        let presampled = solve_sampled_gap(gap, material, load, grid.clone(), config);
+        let shortcut = sphere_on_flat(radius, load, material, grid, config);
+
+        assert!(
+            presampled.diagnostics().converged,
+            "solver did not converge"
+        );
+        assert_relative(
+            presampled.contact_radius(),
+            shortcut.contact_radius(),
+            1.0e-12,
+            "contact radius",
+        );
+        assert_relative(
+            presampled.max_pressure(),
+            shortcut.max_pressure(),
+            1.0e-12,
+            "peak pressure",
+        );
+        assert_relative(
+            presampled.approach(),
+            shortcut.approach(),
+            1.0e-12,
+            "approach",
+        );
     }
 
     #[test]

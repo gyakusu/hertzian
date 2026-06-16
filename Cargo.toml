@@ -23,6 +23,10 @@ crate-type = ["cdylib", "rlib"]
 # for wheel builds via `[tool.maturin] features`, so that `cargo test` and
 # `cargo clippy` can link against libpython locally and in CI.
 pyo3 = "0.29"
+# rust-numpy: the zero-copy NumPy <-> ndarray bridge for the PyO3 layer (P3).
+# Pinned to the pyo3 0.29 series (aligned versioning) so a single Complex/pyo3
+# stack is shared, and it tracks ndarray 0.16 — hence the ndarray pin below.
+numpy = "0.29"
 
 # Numerical core (first milestone: circular Hertz via zero-padded DC-FFT).
 # ndarray is pinned to 0.16 for forward compatibility with rust-numpy (the
