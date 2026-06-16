@@ -7,8 +7,9 @@
 //! free-space DC-FFT, and the non-penetration / non-adhesion constraints are
 //! solved with a Polonsky–Keer bound-constrained conjugate gradient scheme.
 //!
-//! This crate currently implements the first milestone: circular Hertz contact
-//! (sphere on flat / sphere on sphere), validated against the analytic solution.
+//! This crate implements the circular Hertz milestone (sphere on flat / sphere
+//! on sphere) and the elliptic one (a sphere on a torus outer equator), each
+//! validated against its analytic solution.
 
 // Two-dimensional contact mechanics is written in the field's standard notation:
 // single-letter symbols (x, y, a, b, p, u, g) and `_x`/`_y` axis suffixes are
@@ -36,14 +37,14 @@ pub mod solution;
 pub mod solver;
 pub mod validation;
 
-pub use geometry::{Gap, Paraboloid};
+pub use geometry::{Gap, Paraboloid, Torus};
 pub use grid::Grid;
 pub use influence::{DirectSum, FreeSpaceBoussinesq, InfluenceOperator};
 pub use material::Material;
 pub use problem::{Control, Problem};
 pub use solution::{Diagnostics, Solution};
 pub use solver::{Bccg, Config, Solver};
-pub use validation::HertzCircular;
+pub use validation::{HertzCircular, HertzElliptic};
 
 /// Crate version string, surfaced to Python as `hertzian._core.__version__`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");

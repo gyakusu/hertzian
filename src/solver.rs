@@ -171,14 +171,10 @@ fn solve_load_controlled(
         }
     }
 
-    let total_load = pressure.sum() * cell_area;
-    let contact_cells = pressure.iter().filter(|&&p| p > 0.0).count();
-    let contact_area = contact_cells as f64 * cell_area;
     Solution::new(
+        grid.clone(),
         pressure,
         approach,
-        total_load,
-        contact_area,
         Diagnostics {
             iterations,
             residual,
