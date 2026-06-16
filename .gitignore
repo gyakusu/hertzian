@@ -1,0 +1,25 @@
+# --- Rust ---
+/target/
+**/*.rs.bk
+# Cargo.lock IS committed (cdylib/application-style crate, reproducible builds).
+
+# --- Python / uv ---
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+build/
+dist/
+wheels/
+*.egg-info/
+# uv.lock IS committed (reproducible environments).
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store

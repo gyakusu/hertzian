@@ -1,0 +1,40 @@
+[package]
+name = "hertzian"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94"
+description = "FFT-accelerated elastic half-space normal contact solver (Rust core with PyO3 bindings)."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gyakusu/hertzian"
+keywords = ["contact-mechanics", "fft", "hertz", "tribology", "pyo3"]
+categories = ["science", "mathematics"]
+# Not published to crates.io yet; distribution is via PyPI wheels (maturin).
+publish = false
+
+[lib]
+name = "hertzian"
+# `cdylib` builds the Python extension module; `rlib` lets us unit-test the
+# numerical core with `cargo test` without going through Python.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# NOTE: `extension-module` is intentionally NOT enabled here. It is added only
+# for wheel builds via `[tool.maturin] features`, so that `cargo test` and
+# `cargo clippy` can link against libpython locally and in CI.
+pyo3 = "0.29"
+
+# Planned numerical stack (added in the implementation milestone, see README):
+#   ndarray, rustfft, realfft, rayon, numpy (rust-numpy, zero-copy bridge).
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+# Strict static analysis: deny in CI via `cargo clippy -- -D warnings`.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

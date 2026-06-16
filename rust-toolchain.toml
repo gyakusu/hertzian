@@ -1,0 +1,6 @@
+# Single source of truth for the Rust toolchain, used by both local
+# development and CI (CI runs `rustup show` to install exactly this).
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

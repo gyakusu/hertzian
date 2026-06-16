@@ -1,0 +1,105 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "hertzian"
+version = "0.0.0"
+description = "FFT-accelerated elastic half-space normal contact solver (Rust core, PyO3 bindings)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "hertzian contributors" }]
+keywords = ["contact-mechanics", "fft", "hertz", "tribology"]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Private :: Do Not Upload",
+]
+dependencies = [
+  "numpy>=1.26",
+]
+
+[project.urls]
+Repository = "https://github.com/gyakusu/hertzian"
+
+# Development dependencies (PEP 735). Installed by default with `uv sync`.
+# All Python tooling is pinned here so pre-commit and CI use identical versions.
+[dependency-groups]
+dev = [
+  "maturin>=1.7,<2",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "pytest>=8",
+  "pre-commit>=3.5",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "hertzian._core"
+# `extension-module` is enabled only for wheel builds (not for `cargo test`).
+features = ["pyo3/extension-module"]
+strip = true
+
+# ---------------------------------------------------------------------------
+# Ruff: lint + format. `select = ["ALL"]` opts into every rule; the ignore list
+# only removes rules that conflict with the formatter or with each other.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["python", "tests"]
+extend-exclude = ["target"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "D203",   # one-blank-line-before-class (conflicts with D211)
+  "D213",   # multi-line-summary-second-line (conflicts with D212)
+  "COM812", # trailing comma — handled by the formatter
+  "ISC001", # implicit string concat — conflicts with the formatter
+  "CPY001", # copyright notice in every file (licensing is at repo root)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "S101",   # asserts are expected in tests
+  "INP001", # tests is not an importable package
+  "D104",   # no package docstring needed
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# mypy: strict mode plus extra safety nets.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+files = ["python", "tests"]
+mypy_path = ["python"]
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_unimported = true
+namespace_packages = true
+explicit_package_bases = true
+enable_error_code = [
+  "redundant-expr",
+  "truthy-bool",
+  "ignore-without-code",
+  "possibly-undefined",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
