@@ -75,3 +75,42 @@ jobs:
 
       - name: Run pytest
         run: uv run --no-sync pytest
+
+  wheel:
+    name: Wheel (build · install · reproduce P1/P2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install build tooling (maturin) without building the project
+        run: uv sync --frozen --no-install-project
+
+      - name: Build the release wheel (abi3, CPython 3.11+)
+        run: uv run --no-sync maturin build --release --out dist
+
+      # Install the built wheel into a fresh environment and run the suite there,
+      # validating the milestone criterion literally: install the packaged
+      # artifact, then reproduce P1/P2 from Python against it (not the source).
+      - name: Install the wheel into a clean environment
+        run: |
+          uv venv --python 3.11 wheel-env
+          uv pip install --python wheel-env dist/*.whl numpy pytest
+
+      - name: Reproduce P1/P2 from the installed wheel
+        run: uv run --no-project --python wheel-env pytest
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: hertzian-wheel
+          path: dist/*.whl

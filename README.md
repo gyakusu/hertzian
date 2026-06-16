@@ -2,11 +2,14 @@
 
 **FFT-accelerated elastic half-space normal contact solver — Rust core with PyO3 bindings.**
 
-> ⚠️ **Status: provisional scaffolding (Draft 0.1).**
-> This repository currently contains only the project *environment*: CI, shared
-> pre-commit hooks, tooling configuration, and a buildable skeleton. The
-> numerical solver is **not implemented yet** — it lands in the next milestone.
-> This README will be expanded as the implementation progresses.
+> **Status: P0–P3 complete (Draft 0.1).**
+> The Rust core solves circular (sphere–plane / sphere–sphere) and elliptic
+> (sphere on a torus outer equator) Hertz contact via zero-padded free-space
+> DC-FFT and a Polonsky–Keer BCCG solver, each validated against its analytic
+> solution. **Python bindings** (PyO3 + `maturin`, zero-copy NumPy, GIL released
+> during the solve, single `abi3` wheel for CPython 3.11+) expose the solver and
+> reproduce the P1/P2 benchmarks from Python. Arbitrary roughness, periodic
+> boundaries, and multi-body contact remain on the roadmap.
 
 ---
 
@@ -60,7 +63,7 @@ implementation distributable as native `pip` wheels is the differentiator here.
 
 ---
 
-## Planned technology stack
+## Technology stack
 
 | Layer            | Tooling                                                        |
 | ---------------- | ------------------------------------------------------------- |
@@ -69,7 +72,39 @@ implementation distributable as native `pip` wheels is the differentiator here.
 | Python env / dev | [`uv`](https://docs.astral.sh/uv/) (required — no raw Python) |
 | Static analysis  | `ruff` (lint+format), `mypy --strict`, `clippy -D warnings`   |
 
-Only `pyo3` is wired up today; the numerical crates are added with the solver.
+---
+
+## Usage (Python)
+
+```python
+import numpy as np
+import hertzian
+
+# Analytic shortcut: circular Hertz (sphere on a flat). `domain` is the physical
+# width of the (origin-centred) square interface grid, in metres.
+sol = hertzian.solve_sphere_on_flat(
+    radius=10e-3, load=50.0, e_star=70e9, grid=(256, 256), domain=1.2e-3
+)
+print(sol.contact_radius, sol.max_pressure, sol.approach)
+print(sol.diagnostics)            # iterations, residual, converged
+pressure = sol.pressure           # (nx, ny) float64 NumPy array (axis 0 = x)
+
+# Elliptic Hertz: a sphere on a torus outer equator (convex–convex, P2).
+sol = hertzian.solve_sphere_on_torus(
+    sphere_radius=12e-3, tube_radius=4e-3, centre_radius=20e-3,
+    load=60.0, e_star=100e9, grid=(256, 256), domain=1.2e-3,
+)
+print(sol.contact_half_widths, sol.ellipticity)
+
+# General entry point: an arbitrary undeformed-gap height field h(x, y).
+h = np.empty((256, 256))          # fill with your gap (smooth + roughness, …)
+# sol = hertzian.solve_height_field(gap=h, load=50.0, e_star=70e9, dx=dx, dy=dy)
+```
+
+`e_star` is the equivalent modulus `1/E* = (1−ν₁²)/E₁ + (1−ν₂²)/E₂`. The solver
+runs with the GIL released, so calls parallelise across Python threads. Only the
+free-space boundary is implemented in v1; `boundary="periodic"` is reserved and
+raises `NotImplementedError`.
 
 ---
 

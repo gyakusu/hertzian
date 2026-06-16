@@ -32,6 +32,7 @@ pub mod influence;
 pub mod kernel;
 pub mod material;
 pub mod problem;
+mod python;
 pub mod scenarios;
 pub mod solution;
 pub mod solver;
@@ -51,11 +52,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The native extension module backing the `hertzian` Python package.
 ///
-/// For now it only exposes the package version so the build/packaging pipeline
-/// can be verified end to end. Solver entry points are added later.
+/// Exposes the package version, the `Solution` / `Diagnostics` result types,
+/// and the solver entry points (`solve_sphere_on_flat`,
+/// `solve_sphere_on_sphere`, `solve_sphere_on_torus`, `solve_height_field`).
+/// The Python-facing layer lives in the `python` module; this just assembles it.
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", VERSION)?;
+    python::register(module)?;
     Ok(())
 }
 
