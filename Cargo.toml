@@ -24,8 +24,19 @@ crate-type = ["cdylib", "rlib"]
 # `cargo clippy` can link against libpython locally and in CI.
 pyo3 = "0.29"
 
-# Planned numerical stack (added in the implementation milestone, see README):
-#   ndarray, rustfft, realfft, rayon, numpy (rust-numpy, zero-copy bridge).
+# Numerical core (first milestone: circular Hertz via zero-padded DC-FFT).
+# ndarray is pinned to 0.16 for forward compatibility with rust-numpy (the
+# zero-copy PyO3 bridge added in P3, which tracks ndarray a release behind).
+ndarray = "0.16"
+# realfft wraps rustfft for the real->complex row transform (~2x cheaper than
+# C2C); rustfft provides the complex column transform. They share a single
+# num-complex (0.4) version, so one Complex<f64> type is used across the crate.
+realfft = "3.5"
+rustfft = "6.4"
+num-complex = "0.4"
+
+# Not yet wired up (later milestones): rayon (parallelism, P5) and
+# numpy/rust-numpy (zero-copy NumPy bridge, P3).
 
 [lints.rust]
 missing_docs = "warn"
@@ -38,3 +49,8 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+
+# Optimise dependencies even in dev/test builds so the FFT-heavy unit tests run
+# quickly, while our own crate stays unoptimised for debuggable stack traces.
+[profile.dev.package."*"]
+opt-level = 3
