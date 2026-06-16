@@ -33,19 +33,21 @@ pub mod kernel;
 pub mod material;
 pub mod problem;
 mod python;
+pub mod reference;
 pub mod scenarios;
 pub mod solution;
 pub mod solver;
 pub mod validation;
 
-pub use geometry::{Gap, Paraboloid, Torus};
+pub use geometry::{Cone, Gap, HeightField, Paraboloid, Sum, Torus, Waviness};
 pub use grid::Grid;
 pub use influence::{DirectSum, FreeSpaceBoussinesq, InfluenceOperator};
 pub use material::Material;
 pub use problem::{Control, Problem};
+pub use reference::DenseReference;
 pub use solution::{Diagnostics, Solution};
 pub use solver::{Bccg, Config, Solver};
-pub use validation::{HertzCircular, HertzElliptic};
+pub use validation::{HertzCircular, HertzElliptic, SneddonCone};
 
 /// Crate version string, surfaced to Python as `hertzian._core.__version__`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");

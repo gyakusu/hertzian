@@ -6,7 +6,7 @@
 
 use ndarray::Array2;
 
-use crate::geometry::{Gap, Paraboloid, Torus};
+use crate::geometry::{Cone, Gap, Paraboloid, Torus};
 use crate::grid::Grid;
 use crate::influence::FreeSpaceBoussinesq;
 use crate::material::Material;
@@ -103,14 +103,35 @@ pub fn sphere_on_torus(
     )
 }
 
+/// Solves a rigid cone of surface slope `slope` pressed onto a flat.
+///
+/// The non-Hertzian arbitrary-shape benchmark: the conical gap `h = m r` is fed
+/// through the same path as any other shape and validated against Sneddon's
+/// closed form (see [`SneddonCone`](crate::validation::SneddonCone)).
+#[must_use]
+pub fn cone_on_flat(
+    slope: f64,
+    load: f64,
+    material: Material,
+    grid: Grid,
+    config: Config,
+) -> Solution {
+    solve_gap(&Cone::new(slope), material, load, grid, config)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{solve_sampled_gap, sphere_on_flat, sphere_on_sphere, sphere_on_torus};
-    use crate::geometry::{Gap, Paraboloid, Torus};
+    use super::{
+        cone_on_flat, solve_gap, solve_sampled_gap, sphere_on_flat, sphere_on_sphere,
+        sphere_on_torus,
+    };
+    use crate::geometry::{Gap, Paraboloid, Torus, Waviness};
     use crate::grid::Grid;
     use crate::material::Material;
+    use crate::problem::{Control, Problem};
+    use crate::reference::DenseReference;
     use crate::solver::Config;
-    use crate::validation::{HertzCircular, HertzElliptic};
+    use crate::validation::{HertzCircular, HertzElliptic, SneddonCone};
 
     #[allow(
         clippy::cast_precision_loss,
@@ -303,5 +324,108 @@ mod tests {
             "peak pressure",
         );
         assert_relative(solution.approach(), reference.approach(), 0.01, "approach");
+    }
+
+    #[test]
+    fn cone_on_flat_matches_sneddon() {
+        // P4 arbitrary-shape benchmark: a rigid cone fed through the height-field
+        // path reproduces Sneddon's closed-form contact radius, approach and
+        // load. The apex pressure singularity is mesh-dependent, so peak pressure
+        // is deliberately not compared.
+        let slope = 0.02;
+        let load = 60.0;
+        let material = Material::from_e_star(100.0e9);
+        let reference = SneddonCone::new(slope, load, material.e_star());
+
+        // A fine grid spanning a few contact radii: the apex and the contact
+        // edge both need resolution for the area-based radius to converge.
+        let grid = centred_grid(320, 3.0 * reference.contact_radius());
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 5_000,
+        };
+        let solution = cone_on_flat(slope, load, material, grid, config);
+
+        assert!(solution.diagnostics().converged, "solver did not converge");
+        assert_relative(solution.total_load(), load, 1.0e-6, "total load");
+        assert_relative(
+            solution.contact_radius(),
+            reference.contact_radius(),
+            0.03,
+            "contact radius",
+        );
+        assert_relative(solution.approach(), reference.approach(), 0.03, "approach");
+    }
+
+    #[test]
+    fn rough_sphere_cross_validates_against_the_dense_reference() {
+        // P4 cross-validation: a sphere with added cosine roughness has no closed
+        // form, so the production FFT + BCCG solution is checked against the
+        // independent dense projected-Gauss–Seidel reference on the same grid.
+        // Both use identical influence coefficients, so the only difference is
+        // the iterative scheme — agreement validates the solver itself.
+        let radius = 10.0e-3;
+        let load = 40.0;
+        let material = Material::from_e_star(70.0e9);
+        let hertz = HertzCircular::new(radius, load, material.e_star());
+
+        // A small grid keeps the O(N^2) dense solve cheap; the roughness
+        // wavelength is a fraction of the smooth contact so several asperities
+        // fall inside the patch.
+        let grid = centred_grid(40, 2.5 * hertz.contact_radius());
+        let smooth_area = std::f64::consts::PI * hertz.contact_radius().powi(2);
+        let rough = Paraboloid::sphere(radius).plus(Waviness::new(
+            0.8 * hertz.approach(),
+            1.0 * hertz.contact_radius(),
+            1.0 * hertz.contact_radius(),
+        ));
+        let gap = rough.sample(&grid);
+
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 20_000,
+        };
+        let bccg = solve_gap(&rough, material, load, grid.clone(), config);
+        let problem = Problem::new(grid.clone(), gap, Control::Load(load));
+        let dense = DenseReference::new(grid, material.e_star()).solve(&problem, config);
+
+        assert!(bccg.diagnostics().converged, "BCCG did not converge");
+        assert!(
+            dense.diagnostics().converged,
+            "dense reference did not converge",
+        );
+
+        // The roughness genuinely fragments the contact: the real area drops
+        // well below the smooth Hertz disc and the asperities concentrate the
+        // pressure far above the smooth peak. Otherwise this would just be the
+        // circular-Hertz test in disguise.
+        assert!(
+            bccg.contact_area() < 0.6 * smooth_area,
+            "roughness should fragment the contact (area {:e} vs smooth {:e})",
+            bccg.contact_area(),
+            smooth_area,
+        );
+        assert!(
+            bccg.max_pressure() > 1.8 * hertz.max_pressure(),
+            "asperities should raise the peak pressure above the smooth Hertz peak",
+        );
+
+        // Two unrelated solvers on the same kernel and grid converge to the same
+        // discrete solution, so they agree far more tightly than the few-percent
+        // grid-discretisation error of either against a continuum reference.
+        assert_relative(dense.total_load(), load, 1.0e-3, "dense load");
+        assert_relative(
+            bccg.contact_area(),
+            dense.contact_area(),
+            0.02,
+            "contact area",
+        );
+        assert_relative(
+            bccg.max_pressure(),
+            dense.max_pressure(),
+            1.0e-3,
+            "peak pressure",
+        );
+        assert_relative(bccg.approach(), dense.approach(), 1.0e-4, "approach");
     }
 }

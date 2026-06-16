@@ -207,6 +207,95 @@ impl HertzElliptic {
     }
 }
 
+/// Sneddon's analytic solution for a rigid cone on an elastic half-space.
+///
+/// The arbitrary-shape (non-Hertzian) validation reference (design roadmap §3).
+/// For a conical gap `h(r) = m r` of small surface slope `m`, pressed by load
+/// `P` into a half-space of equivalent modulus `E*` (Sneddon, 1965):
+///
+/// ```text
+/// a  = sqrt(2 P / (π E* m)),   δ = (π/2) m a,   p(r) = (E* m / 2) arccosh(a/r),
+/// ```
+///
+/// so `P = (π/2) E* m a²` and the mean pressure is the constant `E* m / 2`.
+/// Unlike Hertz the pressure diverges logarithmically at the apex, so the
+/// grid solver is validated on the contact radius, approach and load rather than
+/// the (mesh-dependent) peak pressure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SneddonCone {
+    contact_radius: f64,
+    approach: f64,
+    mean_pressure: f64,
+    e_star: f64,
+    slope: f64,
+}
+
+impl SneddonCone {
+    /// Computes the solution for surface slope `m`, load `P`, modulus `E*`.
+    ///
+    /// # Panics
+    /// Panics if any argument is not strictly positive and finite.
+    #[must_use]
+    pub fn new(slope: f64, load: f64, e_star: f64) -> Self {
+        assert!(
+            slope > 0.0
+                && load > 0.0
+                && e_star > 0.0
+                && slope.is_finite()
+                && load.is_finite()
+                && e_star.is_finite(),
+            "Sneddon cone inputs must be positive and finite",
+        );
+        let contact_radius = (2.0 * load / (PI * e_star * slope)).sqrt();
+        let approach = 0.5 * PI * slope * contact_radius;
+        let mean_pressure = 0.5 * e_star * slope;
+        Self {
+            contact_radius,
+            approach,
+            mean_pressure,
+            e_star,
+            slope,
+        }
+    }
+
+    /// Contact radius `a`.
+    #[must_use]
+    pub const fn contact_radius(&self) -> f64 {
+        self.contact_radius
+    }
+
+    /// Rigid-body approach `δ = (π/2) m a`.
+    #[must_use]
+    pub const fn approach(&self) -> f64 {
+        self.approach
+    }
+
+    /// Mean contact pressure `P / (π a²) = E* m / 2`.
+    #[must_use]
+    pub const fn mean_pressure(&self) -> f64 {
+        self.mean_pressure
+    }
+
+    /// Total normal load `P = (π/2) E* m a²`.
+    #[must_use]
+    pub fn load(&self) -> f64 {
+        0.5 * PI * self.e_star * self.slope * self.contact_radius * self.contact_radius
+    }
+
+    /// Pressure at radius `r`: `(E* m / 2) arccosh(a/r)`, and `0` for `r >= a`.
+    ///
+    /// Diverges as `r -> 0` (the apex singularity), so it is finite only for
+    /// `0 < r < a`.
+    #[must_use]
+    pub fn pressure_at(&self, r: f64) -> f64 {
+        if r >= self.contact_radius || r <= 0.0 {
+            0.0
+        } else {
+            0.5 * self.e_star * self.slope * (self.contact_radius / r).acosh()
+        }
+    }
+}
+
 /// Solves the elliptic Hertz problem for ordered radii `R_major >= R_minor`.
 ///
 /// Returns `(a, b, p0, delta, e)` with `a` along the major (larger-radius) axis.
@@ -307,6 +396,7 @@ fn complete_elliptic_integrals(modulus: f64) -> (f64, f64) {
 mod tests {
     use super::{
         complete_elliptic_integrals, elliptic_curvature_ratio, HertzCircular, HertzElliptic,
+        SneddonCone,
     };
     use core::f64::consts::PI;
 
@@ -463,9 +553,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cone_relations_are_self_consistent() {
+        // The closed forms must agree with each other: the stored load equals
+        // (π/2) E* m a², the mean pressure equals P/(π a²), and the approach
+        // follows δ = (π/2) m a.
+        let slope = 0.03;
+        let load = 45.0;
+        let e_star = 90.0e9;
+        let cone = SneddonCone::new(slope, load, e_star);
+        let a = cone.contact_radius();
+
+        assert_close(cone.load(), load, 1e-12, "stored load");
+        assert_close(
+            cone.mean_pressure(),
+            load / (PI * a * a),
+            1e-12,
+            "mean pressure",
+        );
+        assert_close(cone.approach(), 0.5 * PI * slope * a, 1e-12, "approach");
+    }
+
+    #[test]
+    fn cone_pressure_integrates_to_the_applied_load() {
+        // Independent cross-check of the closed forms: quadrature of the
+        // arccosh pressure over the contact disc recovers the applied load,
+        // P = ∫₀^a p(r) 2π r dr, confirming the a–P–p relation used to validate
+        // the grid solver. The integrand vanishes at both ends (apex and edge),
+        // so plain composite Simpson is accurate despite the apex singularity.
+        let slope = 0.02;
+        let load = 60.0;
+        let e_star = 100.0e9;
+        let cone = SneddonCone::new(slope, load, e_star);
+        let a = cone.contact_radius();
+
+        let integrated = simpson(0.0, a, 20_000, |r| 2.0 * PI * r * cone.pressure_at(r));
+        assert_close(integrated, load, 1e-4, "integrated cone load");
+    }
+
     // D(phi) = m cos^2 phi + sin^2 phi, the regularised radial factor.
     fn d(phi: f64, m: f64) -> f64 {
         m * phi.cos().powi(2) + phi.sin().powi(2)
+    }
+
+    // Composite Simpson quadrature of `f` over [lo, hi] with `n` (even) panels.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the node index and count are tiny relative to f64's integer range"
+    )]
+    fn simpson<F: Fn(f64) -> f64>(lo: f64, hi: f64, n: usize, f: F) -> f64 {
+        let h = (hi - lo) / n as f64;
+        let mut acc = f(lo) + f(hi);
+        for i in 1..n {
+            let weight = if i % 2 == 0 { 2.0 } else { 4.0 };
+            acc += weight * f(lo + i as f64 * h);
+        }
+        acc * h / 3.0
     }
 
     // Composite Simpson quadrature of `f` over [0, pi/2] with a fine, even mesh.
