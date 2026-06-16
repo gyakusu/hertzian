@@ -4,7 +4,7 @@
 //! the free-space DC-FFT operator, and the problem for a named geometry, then
 //! solve in one call.
 
-use crate::geometry::{Gap, Paraboloid};
+use crate::geometry::{Gap, Paraboloid, Torus};
 use crate::grid::Grid;
 use crate::influence::FreeSpaceBoussinesq;
 use crate::material::Material;
@@ -57,13 +57,38 @@ pub fn sphere_on_sphere(
     solve_gap(&Paraboloid::sphere(radius), material, load, grid, config)
 }
 
+/// Solves a sphere of radius `sphere_radius` pressed onto a torus outer equator.
+///
+/// The convex–convex contact (design §5.2) is elliptic: the circumferential
+/// direction (`x`) is gentler than the meridional one (`y`), so the contact runs
+/// long along `x`. The torus and sphere reduce to a single paraboloidal gap with
+/// distinct effective radii (see [`Torus::against_sphere`]).
+#[must_use]
+pub fn sphere_on_torus(
+    sphere_radius: f64,
+    torus: Torus,
+    load: f64,
+    material: Material,
+    grid: Grid,
+    config: Config,
+) -> Solution {
+    solve_gap(
+        &torus.against_sphere(sphere_radius),
+        material,
+        load,
+        grid,
+        config,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sphere_on_flat, sphere_on_sphere};
+    use super::{sphere_on_flat, sphere_on_sphere, sphere_on_torus};
+    use crate::geometry::Torus;
     use crate::grid::Grid;
     use crate::material::Material;
     use crate::solver::Config;
-    use crate::validation::HertzCircular;
+    use crate::validation::{HertzCircular, HertzElliptic};
 
     #[allow(
         clippy::cast_precision_loss,
@@ -71,6 +96,27 @@ mod tests {
     )]
     fn centred_grid(n: usize, half_width: f64) -> Grid {
         Grid::square(n, 2.0 * half_width / n as f64)
+    }
+
+    // An origin-centred grid sized to an elliptic contact: isotropic spacing
+    // resolving the minor semi-axis, a domain `margin` semi-axes wide on each
+    // side so the free-space boundary is clean, and an even point count per axis.
+    fn elliptic_grid(reference: &HertzElliptic) -> Grid {
+        let margin = 3.0;
+        let spacing = reference.semi_minor() / 24.0;
+        let nx = even_ceil(2.0 * margin * reference.semi_axis_x() / spacing);
+        let ny = even_ceil(2.0 * margin * reference.semi_axis_y() / spacing);
+        Grid::new(nx, ny, spacing, spacing)
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the argument is a small positive grid-point count"
+    )]
+    fn even_ceil(value: f64) -> usize {
+        let n = value.ceil() as usize;
+        n + (n & 1)
     }
 
     fn assert_relative(actual: f64, expected: f64, tolerance: f64, what: &str) {
@@ -137,5 +183,60 @@ mod tests {
             0.05,
             "peak pressure",
         );
+    }
+
+    #[test]
+    fn sphere_on_torus_matches_elliptic_hertz() {
+        // Sphere on a torus outer equator: the P2 elliptic-contact benchmark.
+        let torus = Torus::new(4.0e-3, 20.0e-3);
+        let sphere_radius = 12.0e-3;
+        let load = 60.0;
+        let material = Material::from_e_star(100.0e9);
+
+        // The reference is built from the same effective relative radii the
+        // scenario derives, then computed independently via elliptic integrals.
+        let gap = torus.against_sphere(sphere_radius);
+        let reference = HertzElliptic::new(gap.radius_x(), gap.radius_y(), load, material.e_star());
+        assert!(
+            reference.ellipticity() > 1.5,
+            "test geometry should be clearly elliptic (got {:.3})",
+            reference.ellipticity(),
+        );
+
+        let grid = elliptic_grid(&reference);
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 5_000,
+        };
+        let solution = sphere_on_torus(sphere_radius, torus, load, material, grid, config);
+
+        assert!(solution.diagnostics().converged, "solver did not converge");
+        assert_relative(solution.total_load(), load, 1.0e-6, "total load");
+
+        // Orientation: the contact is elongated circumferentially (along x).
+        let (a_x, a_y) = solution.contact_half_widths();
+        assert!(
+            a_x > a_y,
+            "contact must run long along x (circumferential): a_x={a_x:e} a_y={a_y:e}",
+        );
+
+        // The solver agrees with the independently derived elliptic reference to
+        // well under 1% at this resolution; tolerances leave headroom for the
+        // grid-discretisation error of the second-moment semi-axis estimate.
+        assert_relative(a_x, reference.semi_axis_x(), 0.02, "semi-axis x");
+        assert_relative(a_y, reference.semi_axis_y(), 0.02, "semi-axis y");
+        assert_relative(
+            solution.ellipticity(),
+            reference.ellipticity(),
+            0.02,
+            "ellipticity",
+        );
+        assert_relative(
+            solution.max_pressure(),
+            reference.max_pressure(),
+            0.02,
+            "peak pressure",
+        );
+        assert_relative(solution.approach(), reference.approach(), 0.01, "approach");
     }
 }
