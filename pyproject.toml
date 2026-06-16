@@ -79,6 +79,10 @@ convention = "google"
   "INP001", # tests is not an importable package
   "D104",   # no package docstring needed
 ]
+"scripts/**" = [
+  "INP001", # standalone CLI scripts, not an importable package
+  "T201",   # progress printing is the intended output of a render CLI
+]
 
 [tool.ruff.format]
 docstring-code-format = true

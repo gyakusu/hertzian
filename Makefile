@@ -8,7 +8,7 @@
 SHELL := bash
 
 .PHONY: help setup sync hooks fmt fix lint typecheck lint-rust \
-        build test test-py test-rust check ci clean
+        build gallery test test-py test-rust check ci clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -43,6 +43,9 @@ lint-rust: ## Run rustfmt --check and clippy (strict, -D warnings)
 
 build: ## Build the native extension into the uv venv (maturin develop)
 	uv run maturin develop --uv
+
+gallery: build ## Render the README validation gallery into docs/img (uses matplotlib)
+	uv run --with matplotlib python scripts/render_gallery.py
 
 test: test-rust test-py ## Run the full test suite (Rust + Python)
 

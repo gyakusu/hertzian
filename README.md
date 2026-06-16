@@ -2,6 +2,13 @@
 
 **FFT-accelerated elastic half-space normal contact solver — Rust core with PyO3 bindings.**
 
+<p align="center">
+  <img src="docs/img/hero.png" width="100%"
+       alt="Converged contact-pressure fields for the four problems the solver handles: circular Hertz, elliptic Hertz, Sneddon's cone, and a fragmented rough contact.">
+</p>
+
+<p align="center"><sub>The four contact problems the core solves today, each as its converged contact-pressure field — free-space DC-FFT + Polonsky–Keer BCCG, every case checked against an analytic reference. See the <a href="#gallery--可視化">gallery</a> for the side-by-side validation.</sub></p>
+
 > **Status: P0–P4 complete (Draft 0.1).**
 > The Rust core solves circular (sphere–plane / sphere–sphere) and elliptic
 > (sphere on a torus outer equator) Hertz contact via zero-padded free-space
@@ -127,6 +134,67 @@ print(sol.contact_area, sol.max_pressure)
 runs with the GIL released, so calls parallelise across Python threads. Only the
 free-space boundary is implemented in v1; `boundary="periodic"` is reserved and
 raises `NotImplementedError`.
+
+---
+
+## Gallery / 可視化
+
+ソルバが**現在解いている問題**を、収束した**圧力場**と、それを裏づける**解析解**の
+両方で示します。各図の左が圧力場、右が解析解との比較で、滑らかな Hertz 接触は閉じた
+形と、コーンは Sneddon の閉形式と、粗い接触はスムーズ基準に対する**接触の分裂とピーク
+圧の上昇**で確認できます。
+
+Every contact problem the core solves today, shown as the converged pressure
+field beside the analytic reference it is validated against. The closed forms
+plotted on the right are re-derived in [`scripts/render_gallery.py`](./scripts/render_gallery.py)
+independently of the Rust core, so each panel shows the solver landing on its
+reference rather than on itself.
+
+### Circular Hertz — sphere on flat (P1)
+
+![Circular Hertz contact: the pressure field fills the analytic contact circle, and the per-cell radial pressure collapses onto the Hertz ellipsoid.](docs/img/circular.png)
+
+The axisymmetric benchmark. The pressure field (left) fills the analytic contact
+circle (dashed); plotting **every** grid cell's pressure against `r/a` (right)
+collapses the whole field onto the Hertz ellipsoid `p₀·√(1 − (r/a)²)` — here
+`a ≈ 0.175 mm`, `p₀ ≈ 780 MPa`, matched to ~0.2 %.
+
+### Elliptic Hertz — sphere on a torus outer equator (P2)
+
+![Elliptic Hertz contact: an elongated pressure ellipse matching the analytic contact ellipse, with principal-axis cuts on the analytic profiles.](docs/img/elliptic.png)
+
+The convex–convex contact is elliptic — longer circumferentially (`x`) than
+meridionally (`y`). The measured patch tracks the analytic contact ellipse
+(dashed, `aₓ/a_y ≈ 1.92`), and cuts along each principal axis sit on the
+analytic semi-ellipsoidal profiles (`p₀ ≈ 1.74 GPa`). The eccentricity comes from
+a transcendental curvature relation solved with complete elliptic integrals.
+
+### Sneddon's cone — a non-Hertzian, singular-apex punch (P4)
+
+![Sneddon cone contact: a sharply peaked pressure field, with the radial profile following Sneddon's arccosh law and its logarithmic apex singularity.](docs/img/cone.png)
+
+An **arbitrary** (non-paraboloidal) gap `h = m·r`, fed through the same
+height-field path as any measured surface. Unlike Hertz the pressure diverges
+logarithmically at the apex, so the (mesh-set) peak is *not* compared — but the
+radial profile follows Sneddon's `(E*m/2)·arccosh(a/r)` and the contact radius
+`a ≈ 0.138 mm` lands within ~0.2 % of the closed form.
+
+### Rough contact — sphere + roughness, fragmented (P4)
+
+![Rough contact: the smooth single Hertz patch beside a sphere-plus-roughness contact that has fragmented into a grid of high-pressure asperities.](docs/img/roughness.png)
+
+Layering a cosine roughness onto the smooth sphere (plain height-field addition)
+breaks the single Hertz disc into a grid of **asperity contacts**. At the *same*
+applied load the real contact area drops to ~¼ of the smooth disc and the peak
+pressure rises ~5.6×, the physical signature of rough contact. Rough patches have
+no closed form, so they are cross-validated against an independent dense solver
+and against Tamaas (next section).
+
+> Regenerate the gallery with `make gallery` (or
+> `uv run --with matplotlib python scripts/render_gallery.py`). matplotlib is a
+> render-only dependency, deliberately kept out of the locked environment — like
+> the Tamaas cross-validation below — so its release cadence can never break the
+> core pipeline.
 
 ---
 
