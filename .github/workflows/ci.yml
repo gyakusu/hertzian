@@ -76,6 +76,32 @@ jobs:
       - name: Run pytest
         run: uv run --no-sync pytest
 
+  cross-validation:
+    name: Cross-validation (Tamaas, free-space)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build extension + install (maturin via uv) and sync env
+        run: uv sync --frozen
+
+      # Tamaas is an optional validation-only dependency, kept out of the locked
+      # project env and layered in here so its release cadence cannot break the
+      # core pipeline. Its non-periodic operator matches hertzian's free-space
+      # kernel, so the two must agree on identical smooth and rough contacts.
+      - name: Cross-validate the solver against Tamaas
+        run: uv run --no-sync --with tamaas==2.9.0 pytest tests/test_cross_validation.py -v
+
   wheel:
     name: Wheel (build · install · reproduce P1/P2)
     runs-on: ubuntu-latest
