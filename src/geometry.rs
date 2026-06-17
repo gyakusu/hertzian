@@ -459,8 +459,10 @@ impl GothicArchGroove {
 /// at `y = ±y0` joined by a ridge at the groove centre — the Gothic point, where
 /// the gap is `y0^2 / (2 R_y)` and the ball never touches. Each well is locally
 /// an elliptic-contact paraboloid of relative radii `(R_x, R_y)`, so a separated
-/// Gothic contact is a pair of elliptic Hertz contacts sharing the load. With
-/// `y0 = 0` the two wells merge and it is an ordinary [`Paraboloid`].
+/// Gothic contact is a pair of elliptic Hertz contacts sharing the load. Shrinking
+/// `y0` lowers the central ridge until the two flank contacts meet and overlap into
+/// a single connected patch; with `y0 = 0` the two wells merge entirely and it is
+/// an ordinary [`Paraboloid`].
 ///
 /// This is the geometric superposition the name promises: it equals the pointwise
 /// minimum of two [`Paraboloid`]s offset to `y = ±y0` (the surface closest to the

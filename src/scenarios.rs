@@ -108,9 +108,12 @@ pub fn sphere_on_torus(
 /// The concave counterpart of [`sphere_on_torus`]: the ball sits *inside* a
 /// conformal groove whose cross-section is two arcs (two tori overlaid), so the
 /// gap is the double-welled [`GothicArchProfile`](crate::geometry::GothicArchProfile).
-/// With a non-zero centre offset the ball rides on the two flanks and the contact
-/// splits into a pair of elliptic patches at `y = ±y0`, each carrying half the
-/// load; with a zero offset it reduces to a single conformal elliptic contact.
+/// With a large centre offset the ball rides on two well-separated flanks and the
+/// contact splits into a pair of elliptic patches at `y = ±y0`, each carrying half
+/// the load; with a zero offset it reduces to a single conformal elliptic contact.
+/// Between the two, a tightened offset brings the flank contact ellipses to a
+/// partial *overlap* — a single connected patch whose two peaks reinforce through
+/// the elastic field (no closed form; cross-validated against the dense reference).
 #[must_use]
 pub fn sphere_in_gothic_arch(
     sphere_radius: f64,
@@ -511,6 +514,150 @@ mod tests {
             peak > 0.7 * single.max_pressure(),
             "but only by the load-split factor, not collapse",
         );
+    }
+
+    #[test]
+    fn sphere_in_gothic_arch_half_overlapping_flanks_cross_validate() {
+        // A second Gothic-arch pattern. The separated arch above keeps the two
+        // flanks far enough apart to leave a contact-free Gothic point between
+        // them; here the arc-centre shim is tightened so the two flank contact
+        // ellipses *overlap by half* instead. The design target is the meridional
+        // flank offset y0 = b/2, where b is the meridional semi-axis of one
+        // isolated half-load elliptic flank: two ellipses of semi-axis b whose
+        // centres sit b apart share exactly half their meridional extent (each
+        // overlaps the other by half).
+        //
+        // The overlapping regime has no closed form — the two contacts interact
+        // through the elastic field, so the load no longer splits cleanly into a
+        // pair of P/2 Hertz patches — so it is cross-validated the P4 way: against
+        // the independent dense projected-Gauss–Seidel reference on the same grid,
+        // built on identical influence coefficients but solved by an unrelated
+        // iteration. The physical signatures of the overlap are pinned alongside.
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let load = 60.0;
+        let material = Material::from_e_star(100.0e9);
+        let centre_radius = 15.0e-3;
+
+        // The isolated half-load flank sets the overlap scale b = its meridional
+        // semi-axis; the full-load single arc bounds the peak from above.
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let single =
+            HertzElliptic::new(radii.radius_x(), radii.radius_y(), load, material.e_star());
+
+        // Half overlap: flank centres one meridional semi-axis apart (y0 = b/2).
+        let y0 = 0.5 * flank.semi_axis_y();
+        let centre_offset = y0 * (tube - ball) / ball;
+        let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+        assert_relative(
+            groove.against_sphere(ball).offset(),
+            y0,
+            1.0e-12,
+            "flank offset",
+        );
+
+        // A small *anisotropic* grid: fine across the narrow (x) semi-axis, coarse
+        // along the long (y) one the flanks spread over, kept tiny so the O(N^2)
+        // dense reference stays cheap while still resolving the saddle.
+        let dx = flank.semi_axis_x() / 5.0;
+        let dy = flank.semi_axis_y() / 10.0;
+        let half_x = 2.0 * flank.semi_axis_x();
+        let half_y = y0 + 1.45 * flank.semi_axis_y();
+        let nx = even_ceil(2.0 * half_x / dx);
+        let ny = even_ceil(2.0 * half_y / dy);
+        let grid = Grid::new(nx, ny, dx, dy);
+
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 20_000,
+        };
+        let gap = groove.against_sphere(ball).sample(&grid);
+        let bccg = sphere_in_gothic_arch(ball, groove, load, material, grid.clone(), config);
+        let problem = Problem::new(grid.clone(), gap, Control::Load(load));
+        let dense = DenseReference::new(grid.clone(), material.e_star()).solve(&problem, config);
+
+        assert!(bccg.diagnostics().converged, "BCCG did not converge");
+        assert!(
+            dense.diagnostics().converged,
+            "dense reference did not converge",
+        );
+        assert_relative(bccg.total_load(), load, 1.0e-6, "total load");
+
+        // Two symmetric flank peaks, sitting near ±y0 (the elastic interaction
+        // nudges them slightly outboard of the geometric offset).
+        let (upper_peak, _, j_upper) = flank_peak(&bccg, true);
+        let (lower_peak, _, j_lower) = flank_peak(&bccg, false);
+        let peak = upper_peak.max(lower_peak);
+        assert_relative(upper_peak, lower_peak, 0.02, "flank symmetry");
+        assert!(
+            grid.y(j_upper) > 0.5 * y0 && grid.y(j_upper) < 1.6 * y0,
+            "upper flank must peak near +y0 (got {:e}, y0={y0:e})",
+            grid.y(j_upper),
+        );
+        assert!(
+            grid.y(j_lower) < -0.5 * y0 && grid.y(j_lower) > -1.6 * y0,
+            "lower flank must peak near -y0 (got {:e})",
+            grid.y(j_lower),
+        );
+
+        // The defining contrast with the separated arch: the former Gothic point
+        // now carries load (the contact is *connected*), yet stays below the
+        // flanks, so the two ellipses still read as a saddle-joined pair rather
+        // than one merged patch.
+        let centre = bccg
+            .pressure()
+            .indexed_iter()
+            .filter(|&((_, j), _)| grid.y(j).abs() < 0.2 * y0)
+            .fold(0.0_f64, |m, (_, &p)| m.max(p));
+        assert!(
+            centre > 0.4 * peak,
+            "the overlapped Gothic point must carry load (centre {centre:e} vs peak {peak:e})",
+        );
+        assert!(
+            centre < 0.9 * peak,
+            "but stay below the flanks — a saddle, not a single merged peak",
+        );
+
+        // The overlap raises the peak above the well-separated (1/2)^(1/3) value
+        // (= the isolated half-load flank) but keeps it below the merged
+        // single-arc contact: the split still helps, just less than full
+        // separation would.
+        assert!(
+            peak > flank.max_pressure(),
+            "overlap must raise the peak above the separated flank value ({:e} vs {:e})",
+            peak,
+            flank.max_pressure(),
+        );
+        assert!(
+            peak < single.max_pressure(),
+            "but the split keeps it below the single-arc peak ({:e} vs {:e})",
+            peak,
+            single.max_pressure(),
+        );
+
+        // Cross-validation: two unrelated solvers on the same kernel and grid
+        // land on the same discrete overlapping-contact solution, far tighter
+        // than either's grid-discretisation error against a continuum reference.
+        assert_relative(dense.total_load(), load, 1.0e-3, "dense load");
+        assert_relative(
+            bccg.contact_area(),
+            dense.contact_area(),
+            0.02,
+            "contact area",
+        );
+        assert_relative(
+            bccg.max_pressure(),
+            dense.max_pressure(),
+            1.0e-3,
+            "peak pressure",
+        );
+        assert_relative(bccg.approach(), dense.approach(), 1.0e-3, "approach");
     }
 
     #[test]

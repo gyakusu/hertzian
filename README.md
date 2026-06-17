@@ -246,6 +246,43 @@ pressure sits in the gallery's GPa range; the per-flank equivalence to elliptic
 Hertz at `P/2` and the contact-free ridge are pinned in the Rust scenario tests
 and the Python binding tests.
 
+### Tuning the shim — flanks that overlap by half / 半分だけ重なる2つのフランク
+
+同じ溝のまま**シムを詰める**と、2つのフランク接触は離れたままではなく、**接触楕円が
+半分ずつ重なり合う**ところまで近づきます。設計目標は子午線方向のフランクオフセット
+`y₀ = b/2`（`b` は半荷重の孤立フランク楕円の子午線半軸）。半軸 `b` の2つの楕円の中心が
+`b` だけ離れていれば、互いに**半分ずつ**を共有します。重なりは**ゴシック点を埋め**、接触は
+一続き（連結）になります——分離アーチの非接触リッジとは対照的です。`|y|` の折り返しは
+そのままなので、**左右対称**も変わりません。
+
+Keep the same groove but **tighten the shim**, and the two flank contacts stop
+being separated: their **contact ellipses overlap by half**. The design target is
+a meridional flank offset `y₀ = b/2`, where `b` is the meridional semi-axis of one
+isolated half-load flank ellipse — two ellipses of semi-axis `b` whose centres sit
+`b` apart share exactly **half** their extent. The overlap **fills in the Gothic
+point**, so the contact is now a single **connected** patch — the contrast with the
+separated arch's contact-free ridge — and stays **mirror-symmetric** (the `|y|` fold).
+
+![Half-overlapping Gothic-arch groove: a single connected pressure patch with the two flank contact ellipses (centres y = ±y0 = ±b/2) overlaid overlapping by half, and a meridional cut showing the solver's two peaks joined by an in-contact saddle that rides above the isolated half-load flank semi-ellipses through the shaded overlap band, capped below the single-arc full-load peak.](docs/img/gothic_overlap.png)
+
+重なり領域には**閉形式がありません**——2つのフランクは弾性場を通じて**相互作用**し、荷重は
+もはやきれいに `P/2` ずつには分かれません。重なりはピーク圧を分離時の `(1/2)^{1/3}` 値より
+**押し上げ**ますが、単一アーチ（`y₀ = 0`）のピークより**下**に留まります（ここでは
+`≈ 1.85 GPa`、分離フランクの `1.74 GPa` と単一アーチの `2.19 GPa` の間）。`20 µm` のシムが
+`y₀ ≈ 0.51 mm` を与えます。解析的な拠り所がないので、検証は **P4 方式**——同じ格子上の独立な
+密行列・射影 Gauss–Seidel 参照解との相互検証——で行います。
+
+The overlapping regime has **no closed form**: the two flanks interact through the
+elastic field, so the load no longer splits cleanly into two `P/2` Hertz patches.
+The overlap **raises** the peak above the separated `(1/2)^{1/3}` value yet keeps it
+**below** the single-arc (`y₀ = 0`) peak — here `≈ 1.85 GPa`, between the `1.74 GPa`
+separated flank and the `2.19 GPa` single arc; a `20 µm` shim places the flanks at
+`y₀ ≈ 0.51 mm`. Having no analytic anchor, it is cross-validated the **P4 way** —
+against the independent dense projected-Gauss–Seidel reference on the same grid — with
+the overlap's signatures (a **connected**, load-carrying Gothic point and two
+symmetric flanks joined by a **saddle**) pinned in the Rust scenario and Python
+binding tests.
+
 ---
 
 ## Cross-validation / 相互検証
