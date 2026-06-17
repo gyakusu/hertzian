@@ -285,6 +285,129 @@ binding tests.
 
 ---
 
+## 縮約接触則 — マルチボディ動力学のための軽量 `F(δ)` / A reduced contact law for multibody dynamics
+
+単一の滑らかな Hertz 接触は、`F = k δ^{3/2}` と力の向き `e ∥ (x − o)` という
+**2入力2出力**の代数式で表せます。しかしゴシックアーチ溝のように玉が**2つのフランク**に
+乗る複雑形状では、もはや単一の代数式には収まりません。一方でマルチボディ動力学の
+ような繰り返し計算では、毎ステップ FFT ソルバを回す余裕はありません。そこで検証済みの
+場のソルバを**軽量な力則 `F(δ)`** に蒸留し、形状に合わせて**回帰でフィッティング**します。
+
+A single smooth Hertz contact is the **two-input/two-output** algebraic law
+`F = k δ^{3/2}` with the force `e ∥ (x − o)` along the line of centres. A
+Gothic-arch groove, where the ball rides **two flanks**, no longer fits one
+algebraic form — yet a multibody inner loop cannot afford an FFT solve per step.
+So we distil the validated field solver into a **lightweight force law `F(δ)`**,
+**fit to the shape** by regression.
+
+### The model / モデル
+
+溝の子午断面で、玉中心の変位 `δ = (δ_t, δ_n)`（横断 `t̂` ・法線 `n̂`）が、接触半角 `±α`
+だけ傾いた2つのフランク法線 `n̂_± = (±sin α, cos α)` 方向に各フランクを押し込みます。各
+フランクは（引張なし＝正の部分 `⌊·⌋₊` のみ）Hertz 荷重を担い、合力はそのベクトル和です:
+
+In the groove's meridional plane, a ball-centre displacement `δ = (δ_t, δ_n)`
+compresses two flanks whose contact normals are tilted by the half-angle `±α`,
+`n̂_± = (±sin α, cos α)`. Each carries a Hertzian load along its own normal (no
+adhesion, positive part `⌊·⌋₊` only), and the net force is the vector sum:
+
+```text
+s_± = δ · n̂_±  = δ_n cos α ± δ_t sin α        (per-flank approach)
+Q_± = K ⌊s_±⌋₊^{3/2}                           (per-flank Hertz load)
+F(δ) = Q_+ n̂_+ + Q_- n̂_-
+     →  F_t = (Q_+ − Q_-) sin α,   F_n = (Q_+ + Q_-) cos α
+```
+
+`K` は1フランクの楕円 Hertz 荷重–変位定数、`α` は幾何学的な接触角です。これは単一 Hertz
+接触の `F = k δ^{3/2}` を2フランクに重ね合わせた、2入力2出力の閉形式そのものです。
+
+`K` is one flank's elliptic-Hertz load–deflection constant and `α` the geometric
+contact angle (here `α ≈ 24°`). It is the two-in/two-out closed form that superposes
+two copies of the single Hertz law.
+
+### The boundary condition — a `C¹` two-to-one transition / 境界条件：2溝→1溝の微分連続
+
+荷重が傾くと内側フランクが除荷し、`δ_t = δ_n cot α` で**離れ**ます。接触は**2フランクから
+1フランク**へ移り、力則は単一 Hertz 接触 `F = K s_+^{3/2} n̂_+`（README の1溝の
+`F = k δ^{3/2}`、`e ∥ (x − o)`）に collapse します。**この遷移は `C¹`** ——力**と**その
+ヤコビアン（接線剛性）がともに連続です。理由は Hertz 指数 `3/2 > 1`：除荷するフランクは
+荷重**も**剛性**も**ゼロで噛み合うため、`Q_- ∝ s_-^{3/2} → 0` かつ
+`dQ_-/ds_- ∝ s_-^{1/2} → 0`。**1.5乗こそが、滑らかな2→1の受け渡しを保証する構造**です。
+ただし `C²` ではありません——接線剛性は `√` のカスプ（`d²Q/ds² ∝ s^{-1/2} → ∞`）を持ち、
+これは Hertz 接触が無限初期勾配で硬化する、おなじみの符牒です。
+
+As the load tilts, the inner flank unloads and at `δ_t = δ_n cot α` it **lifts
+off**: the contact passes from **two flanks to one** and the law collapses onto the
+single Hertz contact `F = K s_+^{3/2} n̂_+` — the README's one-groove
+`F = k δ^{3/2}`, `e ∥ (x − o)`. **The transition is `C¹`**: the force *and* its
+Jacobian (tangent stiffness) are continuous, because the Hertzian exponent
+`3/2 > 1` makes a flank engage with zero load *and* zero stiffness
+(`Q_- ∝ s_-^{3/2} → 0`, `dQ_-/ds_- ∝ s_-^{1/2} → 0`). **The `3/2` power is exactly
+what guarantees the smooth two-to-one handover.** It is `C¹` but not `C²` — the
+tangent stiffness has a `√` cusp (`d²Q/ds² ∝ s^{-1/2} → ∞`), the familiar signature
+of a Hertz contact stiffening with an infinite initial rate.
+
+### Fitting & verification / フィッティングと検証
+
+![A four-panel validation of the reduced two-flank law: (A) a log-log calibration with the single-arc solver points on the K·δ^1.5 line and the two-flank points on the 2K line; (B) the calibrated force vector F_t, F_n and |F| swept transversely through the lift-off onto the single-Hertz asymptote; (C) the unloading flank following the universal (1−ξ)^1.5 curve tangent to zero, with the solver's asymmetric-well markers landing on it; (D) the effective flank count η running from ~2 (separated) toward 1 (merged) as the shim tightens.](docs/img/reduced_law.png)
+
+`K` は単一アーチの荷重スイープから較正します：自由勾配の回帰が Hertz 指数 **1.500**
+（理論値 1.5）と `K = P/δ^{3/2}` を **`R² = 1.000000`** で復元し（パネルA、解析 `K` と
+**0.2 %** 一致）、2フランクは `2K` 線に重なって**重ね合わせ**を確認します。パネルB は較正済み
+の `F(δ_t, δ_n)` を横断方向にスイープし、離れの先で単一 Hertz 漸近線に滑らかに乗る様子
+（`C¹`）を示します。パネルC は除荷フランクが普遍曲線 `Q_-/Q_-(0) = (1−ξ)^{3/2}` に従い
+**接線的にゼロへ**接する様子で、ソルバの非対称ウェル実験のマーカーが（**3 %** 以内で）その上に
+乗ります——**3/2乗が `C¹` そのもの**。パネルD はシムを詰めると有効フランク数
+`η = P/(K δ^{3/2})` が **1.95**（分離した2フランク）から 1（合体した単一アーチ）へ動く、
+幾何駆動の2→1で、`η` が 2 に満たない分が単一 `K` モデルの残差に畳み込む弾性カップリングです。
+
+`K` is calibrated from a single-arc load sweep: a free-slope regression recovers the
+Hertz exponent **1.500** (theory 1.5) and `K = P/δ^{3/2}` at **`R² = 1.000000`**
+(panel A; matching the analytic `K` to **0.2 %**), and two flanks land on the `2K`
+line — **superposition** confirmed. Panel B sweeps the calibrated `F(δ_t, δ_n)`
+transversely, riding smoothly onto the single-Hertz asymptote past lift-off (`C¹`).
+Panel C shows the unloading flank following the universal
+`Q_-/Q_-(0) = (1 − ξ)^{3/2}`, **tangent to zero**, with the solver's asymmetric-well
+markers landing on it to within **3 %** — **the `3/2` power is the `C¹`**. Panel D
+traces the geometry-driven two-to-one: tightening the shim runs the effective flank
+count `η = P/(K δ^{3/2})` from **1.95** (two separated flanks) down toward 1 (one
+merged arc), the shortfall below 2 being the elastic coupling the single-`K` model
+folds into its residual.
+
+これは新しいソルバ機能ではなく、**検証済みプリミティブの蒸留**です：閉形式の `F(δ)` は
+FFT を一切呼ばず `powf` 数回で評価でき、マルチボディの内側ループに直接置けます。Rust コア
+（`hertzian::GothicArchLaw`、解析ヤコビアン付き）と Python バインディング
+（`hertzian.GothicArchLaw`）の両方で公開し、`C¹` と Hertz 極限、ソルバとの一致を Rust／
+Python テストに固定しています。図は `make gallery`（または
+`uv run --with matplotlib python scripts/fit_reduced_law.py`）で再生成します。
+
+This is not a new solver capability but a **distillation of the validated
+primitive**: the closed-form `F(δ)` calls no FFT, evaluates in a couple of `powf`s,
+and drops straight into a multibody inner loop. It is exposed in both the Rust core
+(`hertzian::GothicArchLaw`, with the analytic Jacobian) and the Python bindings
+(`hertzian.GothicArchLaw`); the `C¹` property, the Hertz limit, and the agreement
+with the field solver are pinned in the Rust and Python tests. Regenerate the figure
+with `make gallery` (or
+`uv run --with matplotlib python scripts/fit_reduced_law.py`).
+
+```python
+import hertzian
+
+# Calibrate the law once from the flank geometry (no FFT solve at runtime).
+law = hertzian.GothicArchLaw.from_elliptic_flank(
+    radius_x=3.31e-3,  # circumferential relative radius of one flank
+    radius_y=0.104,  # meridional (conformal) relative radius
+    e_star=100e9,
+    contact_angle=hertzian.contact_half_angle(offset=1.6e-3, ball_radius=4e-3),
+)
+
+# Then, in the multibody inner loop, evaluate F(δ) and its tangent stiffness:
+f_t, f_n = law.force(2e-6, 6e-6)  # contact force vector (N)
+stiffness = law.jacobian(2e-6, 6e-6)  # 2x2 tangent stiffness dF/dδ (N/m)
+```
+
+---
+
 ## Cross-validation / 相互検証
 
 Smooth Hertz contacts are checked against their closed form, but arbitrary

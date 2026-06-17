@@ -3,7 +3,7 @@
 The numerical core is implemented in Rust and exposed through the
 ``hertzian._core`` extension module; this package re-exports its public API.
 
-Two layers are offered (design §8.5):
+Three layers are offered (design §8.5):
 
 * **Analytic shortcuts** for the validated Hertz benchmarks --
   :func:`solve_sphere_on_flat`, :func:`solve_sphere_on_sphere`,
@@ -11,9 +11,13 @@ Two layers are offered (design §8.5):
   (a ball in a two-arc, ogival bearing groove).
 * A **general gap input**, :func:`solve_height_field`, taking an arbitrary
   undeformed-gap height field as a NumPy array.
+* A **reduced force law**, :class:`GothicArchLaw`, distilling the two-flank
+  Gothic-arch contact into a lightweight ``force(delta_t, delta_n)`` map for
+  multibody inner loops -- ``C¹`` across the two-to-one flank transition and
+  reducing to the single Hertz contact (see :func:`contact_half_angle`).
 
-Each returns a :class:`Solution` carrying the converged pressure field (as a
-zero-copy NumPy array) and the derived contact quantities.
+The solver layers return a :class:`Solution` carrying the converged pressure field
+(as a zero-copy NumPy array) and the derived contact quantities.
 
 Example:
     >>> import hertzian
@@ -28,8 +32,10 @@ from __future__ import annotations
 
 from hertzian._core import (
     Diagnostics,
+    GothicArchLaw,
     Solution,
     __version__,
+    contact_half_angle,
     solve_height_field,
     solve_sphere_in_gothic_arch,
     solve_sphere_on_flat,
@@ -39,8 +45,10 @@ from hertzian._core import (
 
 __all__ = [
     "Diagnostics",
+    "GothicArchLaw",
     "Solution",
     "__version__",
+    "contact_half_angle",
     "solve_height_field",
     "solve_sphere_in_gothic_arch",
     "solve_sphere_on_flat",
