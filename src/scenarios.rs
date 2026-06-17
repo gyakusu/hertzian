@@ -158,6 +158,7 @@ mod tests {
     use crate::grid::Grid;
     use crate::material::Material;
     use crate::problem::{Control, Problem};
+    use crate::reduced::GothicArchLaw;
     use crate::reference::DenseReference;
     use crate::solver::Config;
     use crate::validation::{HertzCircular, HertzElliptic, SneddonCone};
@@ -658,6 +659,90 @@ mod tests {
             "peak pressure",
         );
         assert_relative(bccg.approach(), dense.approach(), 1.0e-3, "approach");
+    }
+
+    #[test]
+    fn gothic_arch_reduced_law_tracks_the_field_solver() {
+        // The reduced two-flank force law (crate::reduced) stands in for the field
+        // solver in a multibody inner loop, so it must reproduce what the solver
+        // computes. Its per-flank stiffness K is calibrated from the elliptic-Hertz
+        // flank; here we confirm against the FFT + BCCG solver that (1) the scalar
+        // Hertz flank load reproduces the single-arc load–deflection, and (2) two
+        // separated flanks superpose — the load doubles at the same approach, each
+        // flank carrying half. Together these pin the law the regression rests on:
+        // F(δ) = Σ K⌊s_i⌋₊^{3/2} n̂_i with K from one validated elliptic flank.
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 60.0;
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 20_000,
+        };
+
+        // Calibrate the law from the flank's relative radii (the contact angle is
+        // geometric and does not enter the scalar flank stiffness).
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let law = GothicArchLaw::from_elliptic_flank(
+            radii.radius_x(),
+            radii.radius_y(),
+            material.e_star(),
+            0.4,
+        );
+
+        // (1) Single arc — one elliptic flank. The law's scalar Hertz load must
+        // reproduce the solver's load at the solver's own approach.
+        let single_reference =
+            HertzElliptic::new(radii.radius_x(), radii.radius_y(), load, material.e_star());
+        let single = sphere_in_gothic_arch(
+            ball,
+            GothicArchGroove::new(tube, centre_radius, 0.0),
+            load,
+            material,
+            gothic_grid(&single_reference, 0.0),
+            config,
+        );
+        assert!(
+            single.diagnostics().converged,
+            "single arc did not converge"
+        );
+        assert_relative(
+            law.flank_load(single.approach()),
+            single.total_load(),
+            0.08,
+            "single-flank law vs solver",
+        );
+
+        // (2) Two separated flanks at the same total load: each carries half, so
+        // the law predicts twice the single-flank load at the (smaller) two-flank
+        // approach.
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let y0 = 1.6 * flank.semi_axis_y();
+        let centre_offset = y0 * (tube - ball) / ball;
+        let split = sphere_in_gothic_arch(
+            ball,
+            GothicArchGroove::new(tube, centre_radius, centre_offset),
+            load,
+            material,
+            gothic_grid(&flank, y0),
+            config,
+        );
+        assert!(
+            split.diagnostics().converged,
+            "split contact did not converge"
+        );
+        assert_relative(
+            2.0 * law.flank_load(split.approach()),
+            split.total_load(),
+            0.10,
+            "two-flank superposition law vs solver",
+        );
     }
 
     #[test]

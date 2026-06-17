@@ -16,6 +16,8 @@
 //!   `ValueError`/`TypeError`, never as Rust panics surfacing as
 //!   `PanicException`.
 
+use core::f64::consts::FRAC_PI_2;
+
 use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
@@ -24,6 +26,7 @@ use pyo3::prelude::*;
 use crate::geometry::{GothicArchGroove, Torus};
 use crate::grid::Grid;
 use crate::material::Material;
+use crate::reduced::{contact_half_angle as core_contact_half_angle, GothicArchLaw as CoreLaw};
 use crate::scenarios::{
     solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat, sphere_on_sphere, sphere_on_torus,
 };
@@ -38,11 +41,13 @@ use crate::solver::Config;
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Solution>()?;
     module.add_class::<Diagnostics>()?;
+    module.add_class::<GothicArchLaw>()?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_flat, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_sphere, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_torus, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_in_gothic_arch, module)?)?;
     module.add_function(wrap_pyfunction!(solve_height_field, module)?)?;
+    module.add_function(wrap_pyfunction!(contact_half_angle, module)?)?;
     Ok(())
 }
 
@@ -176,6 +181,125 @@ impl Solution {
             self.inner.approach(),
         )
     }
+}
+
+/// A reduced, closed-form two-flank contact law for a Gothic-arch groove.
+///
+/// The lightweight stand-in for the field solver in a multibody inner loop: a
+/// `force(delta_t, delta_n) -> (F_t, F_n)` map built from one flank's Hertz
+/// stiffness and the contact half-angle (see `hertzian.reduced` design notes). It
+/// reduces to a single Hertz contact when one flank lifts off, and varies `C¹`
+/// across that two-to-one transition because the Hertzian `3/2` exponent makes a
+/// flank engage with zero load *and* zero stiffness. [`GothicArchLaw.jacobian`]
+/// returns the analytic tangent stiffness for implicit integrators.
+#[pyclass(name = "GothicArchLaw", module = "hertzian._core", frozen)]
+struct GothicArchLaw {
+    inner: CoreLaw,
+}
+
+#[pymethods]
+impl GothicArchLaw {
+    /// Build from a per-flank stiffness `K` (N·m^−3/2) and half-angle `α` (rad).
+    #[new]
+    #[pyo3(signature = (*, stiffness, contact_angle))]
+    fn new(stiffness: f64, contact_angle: f64) -> PyResult<Self> {
+        require_positive(stiffness, "stiffness")?;
+        require_contact_angle(contact_angle)?;
+        Ok(Self {
+            inner: CoreLaw::new(stiffness, contact_angle),
+        })
+    }
+
+    /// Calibrate the stiffness from one flank's elliptic-Hertz contact.
+    ///
+    /// `radius_x`, `radius_y` are the flank's principal relative radii and
+    /// `e_star` the equivalent modulus; `contact_angle` is the geometric flank
+    /// half-angle `α` (see [`contact_half_angle`]).
+    #[staticmethod]
+    #[pyo3(signature = (*, radius_x, radius_y, e_star, contact_angle))]
+    fn from_elliptic_flank(
+        radius_x: f64,
+        radius_y: f64,
+        e_star: f64,
+        contact_angle: f64,
+    ) -> PyResult<Self> {
+        require_positive(radius_x, "radius_x")?;
+        require_positive(radius_y, "radius_y")?;
+        require_positive(e_star, "e_star")?;
+        require_contact_angle(contact_angle)?;
+        Ok(Self {
+            inner: CoreLaw::from_elliptic_flank(radius_x, radius_y, e_star, contact_angle),
+        })
+    }
+
+    /// The per-flank Hertz stiffness `K` (N·m^−3/2).
+    #[getter]
+    const fn stiffness(&self) -> f64 {
+        self.inner.stiffness()
+    }
+
+    /// The contact half-angle `α` (radians).
+    #[getter]
+    const fn contact_angle(&self) -> f64 {
+        self.inner.contact_angle()
+    }
+
+    /// One flank's Hertz load `Q = K⌊s⌋₊^{3/2}` for an approach `s` (no adhesion).
+    fn flank_load(&self, approach: f64) -> f64 {
+        self.inner.flank_load(approach)
+    }
+
+    /// The two flank approaches `(s_+, s_-)` for a displacement `(delta_t, delta_n)`.
+    fn flank_approaches(&self, delta_t: f64, delta_n: f64) -> (f64, f64) {
+        self.inner.flank_approaches(delta_t, delta_n)
+    }
+
+    /// The two flank loads `(Q_+, Q_-)` for a displacement `(delta_t, delta_n)`.
+    fn flank_loads(&self, delta_t: f64, delta_n: f64) -> (f64, f64) {
+        self.inner.flank_loads(delta_t, delta_n)
+    }
+
+    /// The net contact force `(F_t, F_n)` for a displacement `(delta_t, delta_n)`.
+    fn force(&self, delta_t: f64, delta_n: f64) -> (f64, f64) {
+        self.inner.force(delta_t, delta_n)
+    }
+
+    /// The analytic tangent stiffness `dF/dδ` as `((∂F_t/∂δ_t, ∂F_t/∂δ_n), …)`.
+    fn jacobian(&self, delta_t: f64, delta_n: f64) -> ((f64, f64), (f64, f64)) {
+        let j = self.inner.jacobian(delta_t, delta_n);
+        ((j[0][0], j[0][1]), (j[1][0], j[1][1]))
+    }
+
+    /// The transverse displacement `δ_t* = δ_n cot α` at which a flank lifts off.
+    fn lift_off_transverse(&self, delta_n: f64) -> f64 {
+        self.inner.lift_off_transverse(delta_n)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "GothicArchLaw(stiffness={:.6e}, contact_angle={:.6e})",
+            self.inner.stiffness(),
+            self.inner.contact_angle(),
+        )
+    }
+}
+
+/// Geometric contact half-angle `α = arcsin(offset / ball_radius)` (radians).
+///
+/// The angle the flank contact normal makes with the groove axis when the flank
+/// contact sits a meridional distance `offset` from the axis on a ball of radius
+/// `ball_radius`. Use it to orient [`GothicArchLaw`]'s flank normals.
+#[pyfunction]
+#[pyo3(signature = (*, offset, ball_radius))]
+fn contact_half_angle(offset: f64, ball_radius: f64) -> PyResult<f64> {
+    require_positive(ball_radius, "ball_radius")?;
+    require_non_negative(offset, "offset")?;
+    if offset >= ball_radius {
+        return Err(PyValueError::new_err(format!(
+            "offset ({offset}) must be smaller than ball_radius ({ball_radius})"
+        )));
+    }
+    Ok(core_contact_half_angle(offset, ball_radius))
 }
 
 /// Solve a sphere of radius `radius` pressed onto a flat (circular Hertz, P1).
@@ -434,6 +558,17 @@ fn require_non_negative(value: f64, name: &str) -> PyResult<()> {
     } else {
         Err(PyValueError::new_err(format!(
             "{name} must be non-negative and finite, got {value}"
+        )))
+    }
+}
+
+// The flank contact half-angle must be a real groove angle in (0, pi/2).
+fn require_contact_angle(value: f64) -> PyResult<()> {
+    if value.is_finite() && value > 0.0 && value < FRAC_PI_2 {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "contact_angle must lie in (0, pi/2), got {value}"
         )))
     }
 }
