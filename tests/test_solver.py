@@ -32,6 +32,11 @@ DOME_RTOL = 0.05
 EXACT_RTOL = 1e-9
 MIN_ELLIPTICITY = 1.5
 MAX_PEAK_OFFSET_CELLS = 1
+# Gothic-arch split tolerances: the two flanks must be near-symmetric and sit
+# close to the analytic flank offset y0 (a few percent of grid-discretisation
+# headroom on the second is plenty).
+FLANK_SYMMETRY_RTOL = 0.02
+FLANK_LOCATION_RTOL = 0.10
 
 
 def _relative_error(actual: float, expected: float) -> float:
@@ -151,6 +156,55 @@ def test_sphere_on_torus_is_elliptic() -> None:
     assert abs(int(peak[1]) - shape[1] // 2) <= MAX_PEAK_OFFSET_CELLS
 
 
+def test_sphere_in_gothic_arch_splits_into_two_flank_contacts() -> None:
+    """A shimmed Gothic-arch groove makes the ball ride on two flanks.
+
+    The defining behaviour of an ogival ball-bearing groove: with the two arc
+    centres offset, the single conformal patch splits into a symmetric pair of
+    contacts at ``y = ±y0`` with a contact-free "Gothic point" ridge between
+    them, at conserved load. (That each flank is an elliptic Hertz contact
+    carrying half the load is pinned analytically in the Rust scenario tests; the
+    binding test checks the split, symmetry and ridge it produces.)
+    """
+    ball, tube, centre_radius, e_star = 4.0e-3, 4.16e-3, 15.0e-3, 100.0e9  # r/Rs = 1.04
+    shim, load = 65.0e-6, 800.0
+    nx, ny = 84, 720
+    domain = (0.66e-3, 5.8e-3)
+
+    sol = hertzian.solve_sphere_in_gothic_arch(
+        sphere_radius=ball,
+        tube_radius=tube,
+        centre_radius=centre_radius,
+        centre_offset=shim,
+        load=load,
+        e_star=e_star,
+        grid=(nx, ny),
+        domain=domain,
+        tol=1e-8,
+        max_iter=30000,
+    )
+
+    assert sol.diagnostics.converged
+    assert _relative_error(sol.total_load, load) <= LOAD_RTOL
+
+    pressure = sol.pressure
+    peak = float(pressure.max())
+    y = (np.arange(ny, dtype=np.float64) - (ny - 1) / 2.0) * (domain[1] / ny)
+    y0 = shim * ball / (tube - ball)  # flank offset, amplified by the conformity
+
+    # Two flanks: equal peaks in the two y-halves, located near y = ±y0.
+    mid = ny // 2
+    upper = float(pressure[:, mid:].max())
+    lower = float(pressure[:, :mid].max())
+    assert _relative_error(upper, lower) <= FLANK_SYMMETRY_RTOL
+    j_peak = int(np.argmax(pressure)) % ny
+    assert _relative_error(abs(y[j_peak]), y0) <= FLANK_LOCATION_RTOL
+
+    # The Gothic point carries no load: the central band is contact-free.
+    ridge = float(pressure[:, np.abs(y) < 0.3 * y0].max())
+    assert ridge <= 0.05 * peak
+
+
 def test_height_field_matches_sphere_shortcut() -> None:
     """The general height-field path reproduces the sphere-on-flat shortcut.
 
@@ -234,6 +288,21 @@ def test_negative_radius_raises_value_error() -> None:
             e_star=70.0e9,
             grid=(32, 32),
             domain=1e-3,
+        )
+
+
+def test_gothic_arch_rejects_a_ball_wider_than_the_groove() -> None:
+    """A ball at least as wide as the groove has no conformal contact."""
+    with pytest.raises(ValueError, match="must be smaller than tube_radius"):
+        hertzian.solve_sphere_in_gothic_arch(
+            sphere_radius=4.0e-3,
+            tube_radius=4.0e-3,  # equal: no clearance, no conformal contact
+            centre_radius=15.0e-3,
+            centre_offset=50.0e-6,
+            load=100.0,
+            e_star=100.0e9,
+            grid=(32, 64),
+            domain=(0.5e-3, 2.0e-3),
         )
 
 

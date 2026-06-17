@@ -6,7 +6,7 @@
 
 use ndarray::Array2;
 
-use crate::geometry::{Cone, Gap, Paraboloid, Torus};
+use crate::geometry::{Cone, Gap, GothicArchGroove, Paraboloid, Torus};
 use crate::grid::Grid;
 use crate::influence::FreeSpaceBoussinesq;
 use crate::material::Material;
@@ -103,6 +103,32 @@ pub fn sphere_on_torus(
     )
 }
 
+/// Solves a sphere pressed into a Gothic-arch (ogival) groove.
+///
+/// The concave counterpart of [`sphere_on_torus`]: the ball sits *inside* a
+/// conformal groove whose cross-section is two arcs (two tori overlaid), so the
+/// gap is the double-welled [`GothicArchProfile`](crate::geometry::GothicArchProfile).
+/// With a non-zero centre offset the ball rides on the two flanks and the contact
+/// splits into a pair of elliptic patches at `y = ±y0`, each carrying half the
+/// load; with a zero offset it reduces to a single conformal elliptic contact.
+#[must_use]
+pub fn sphere_in_gothic_arch(
+    sphere_radius: f64,
+    groove: GothicArchGroove,
+    load: f64,
+    material: Material,
+    grid: Grid,
+    config: Config,
+) -> Solution {
+    solve_gap(
+        &groove.against_sphere(sphere_radius),
+        material,
+        load,
+        grid,
+        config,
+    )
+}
+
 /// Solves a rigid cone of surface slope `slope` pressed onto a flat.
 ///
 /// The non-Hertzian arbitrary-shape benchmark: the conical gap `h = m r` is fed
@@ -122,10 +148,10 @@ pub fn cone_on_flat(
 #[cfg(test)]
 mod tests {
     use super::{
-        cone_on_flat, solve_gap, solve_sampled_gap, sphere_on_flat, sphere_on_sphere,
-        sphere_on_torus,
+        cone_on_flat, solve_gap, solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat,
+        sphere_on_sphere, sphere_on_torus,
     };
-    use crate::geometry::{Gap, Paraboloid, Torus, Waviness};
+    use crate::geometry::{Gap, GothicArchGroove, Paraboloid, Torus, Waviness};
     use crate::grid::Grid;
     use crate::material::Material;
     use crate::problem::{Control, Problem};
@@ -160,6 +186,36 @@ mod tests {
     fn even_ceil(value: f64) -> usize {
         let n = value.ceil() as usize;
         n + (n & 1)
+    }
+
+    // A grid for a Gothic contact: two elliptic patches centred at y = ±y0, each
+    // sized like `reference` (one flank at half the load). Isotropic spacing
+    // resolves the minor (x) semi-axis; the domain spans both flanks plus a clean
+    // free-space margin, tall along the split (y) axis and narrow across it.
+    fn gothic_grid(reference: &HertzElliptic, offset: f64) -> Grid {
+        let spacing = reference.semi_axis_x() / 12.0;
+        let margin = 2.0 * reference.semi_axis_x();
+        let half_x = reference.semi_axis_x() + margin;
+        let half_y = offset + reference.semi_axis_y() + margin;
+        let nx = even_ceil(2.0 * half_x / spacing);
+        let ny = even_ceil(2.0 * half_y / spacing);
+        Grid::new(nx, ny, spacing, spacing)
+    }
+
+    // Peak pressure within the y-half on one side of the groove centre (column
+    // `j < mid` or `j >= mid`), with its (i, j) location. Isolates a single flank
+    // of a split Gothic contact so each patch can be checked on its own.
+    fn flank_peak(solution: &crate::solution::Solution, upper: bool) -> (f64, usize, usize) {
+        let pressure = solution.pressure();
+        let mid = pressure.ncols() / 2;
+        let mut best = (0.0_f64, 0, 0);
+        for ((i, j), &p) in pressure.indexed_iter() {
+            let in_half = if upper { j >= mid } else { j < mid };
+            if in_half && p > best.0 {
+                best = (p, i, j);
+            }
+        }
+        best
     }
 
     fn assert_relative(actual: f64, expected: f64, tolerance: f64, what: &str) {
@@ -324,6 +380,137 @@ mod tests {
             "peak pressure",
         );
         assert_relative(solution.approach(), reference.approach(), 0.01, "approach");
+    }
+
+    #[test]
+    fn sphere_in_gothic_arch_without_offset_matches_elliptic_hertz() {
+        // With no centre shim the Gothic groove is a single conformal arc, so the
+        // ball-in-groove contact is one elliptic Hertz patch — the concave
+        // counterpart of the torus benchmark, validating the groove reduction
+        // (concave meridional radius, convex circumferential radius).
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball; // r/Rs = 1.04: a textbook bearing conformity
+        let groove = GothicArchGroove::new(tube, 15.0e-3, 0.0);
+        let load = 60.0;
+        let material = Material::from_e_star(100.0e9);
+
+        let profile = groove.against_sphere(ball);
+        let reference = HertzElliptic::new(
+            profile.radius_x(),
+            profile.radius_y(),
+            load,
+            material.e_star(),
+        );
+        // High conformity makes the patch strongly elliptic (long across groove).
+        assert!(
+            reference.ellipticity() > 5.0,
+            "a conformal groove contact should be strongly elliptic (got {:.2})",
+            reference.ellipticity(),
+        );
+
+        let grid = gothic_grid(&reference, 0.0);
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 10_000,
+        };
+        let solution = sphere_in_gothic_arch(ball, groove, load, material, grid, config);
+
+        assert!(solution.diagnostics().converged, "solver did not converge");
+        assert_relative(solution.total_load(), load, 1.0e-6, "total load");
+
+        // The conformal contact runs long across the groove (meridional y).
+        let (a_x, a_y) = solution.contact_half_widths();
+        assert!(a_y > a_x, "contact must run long across the groove (y)");
+        assert_relative(a_x, reference.semi_axis_x(), 0.03, "semi-axis x");
+        assert_relative(a_y, reference.semi_axis_y(), 0.03, "semi-axis y");
+        assert_relative(
+            solution.max_pressure(),
+            reference.max_pressure(),
+            0.03,
+            "peak pressure",
+        );
+    }
+
+    #[test]
+    fn sphere_in_gothic_arch_splits_into_two_elliptic_contacts() {
+        // The defining behaviour of a Gothic arch: a shimmed groove makes the ball
+        // ride on two flanks, so the single conformal patch splits into a pair of
+        // elliptic contacts at y = ±y0, each carrying half the load. Each flank
+        // must therefore match elliptic Hertz at P/2, and the split must lower the
+        // peak pressure below the single full-load contact (the design payoff).
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let load = 60.0;
+        let material = Material::from_e_star(100.0e9);
+        let centre_radius = 15.0e-3;
+
+        // Each flank is an elliptic Hertz contact at half the total load.
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+
+        // Shim the centres so the flanks sit 1.6 major semi-axes off the centre:
+        // comfortably separated, leaving a contact-free Gothic ridge between them.
+        let y0 = 1.6 * flank.semi_axis_y();
+        let centre_offset = y0 * (tube - ball) / ball;
+        let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+        assert_relative(
+            groove.against_sphere(ball).offset(),
+            y0,
+            1.0e-12,
+            "flank offset",
+        );
+
+        let grid = gothic_grid(&flank, y0);
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 20_000,
+        };
+        let solution = sphere_in_gothic_arch(ball, groove, load, material, grid.clone(), config);
+
+        assert!(solution.diagnostics().converged, "solver did not converge");
+        assert_relative(solution.total_load(), load, 1.0e-6, "total load");
+
+        // Two flanks, each a P/2 elliptic Hertz contact peaking near y = ±y0.
+        let (upper_peak, _, j_upper) = flank_peak(&solution, true);
+        let (lower_peak, _, j_lower) = flank_peak(&solution, false);
+        assert_relative(upper_peak, flank.max_pressure(), 0.09, "upper-flank peak");
+        assert_relative(lower_peak, flank.max_pressure(), 0.09, "lower-flank peak");
+        assert_relative(upper_peak, lower_peak, 0.03, "flank symmetry");
+        assert_relative(grid.y(j_upper), y0, 0.10, "upper-flank location");
+        assert_relative(grid.y(j_lower), -y0, 0.10, "lower-flank location");
+
+        // The Gothic ridge carries no load: the centre band is contact-free.
+        let peak = upper_peak.max(lower_peak);
+        let ridge_pressure = solution
+            .pressure()
+            .indexed_iter()
+            .filter(|&((_, j), _)| grid.y(j).abs() < 0.3 * y0)
+            .fold(0.0_f64, |m, (_, &p)| m.max(p));
+        assert!(
+            ridge_pressure < 0.05 * peak,
+            "the Gothic ridge must stay contact-free (ridge {ridge_pressure:e} vs peak {peak:e})",
+        );
+
+        // Splitting the load across two patches lowers the peak pressure relative
+        // to the single full-load contact, by ~(1/2)^(1/3) for well-separated
+        // elliptic patches.
+        let single =
+            HertzElliptic::new(radii.radius_x(), radii.radius_y(), load, material.e_star());
+        assert!(
+            peak < 0.9 * single.max_pressure(),
+            "the split must lower the peak below the single contact ({:e} vs {:e})",
+            peak,
+            single.max_pressure(),
+        );
+        assert!(
+            peak > 0.7 * single.max_pressure(),
+            "but only by the load-split factor, not collapse",
+        );
     }
 
     #[test]

@@ -10,6 +10,11 @@ against:
 * **rough contact** -- a sphere plus cosine roughness, which fragments the patch
   into asperities (P4).
 
+It also renders one **applied example** built from these primitives:
+
+* **Gothic-arch groove** -- a ball in a two-arc ogival bearing race, whose
+  contact splits into two flanks, each an elliptic Hertz contact at half the load.
+
 The analytic Hertz / Sneddon closed forms are re-implemented here (independently
 of the Rust core) so each panel shows the solver landing on its reference rather
 than on itself. Figures are written to ``docs/img/`` and embedded by the README.
@@ -122,6 +127,18 @@ def sneddon_cone(slope: float, load: float, e_star: float) -> tuple[float, float
     """Return ``(contact_radius, approach)`` for Sneddon's rigid cone."""
     a = math.sqrt(2.0 * load / (math.pi * e_star * slope))
     return a, 0.5 * math.pi * slope * a
+
+
+def gothic_radii(ball: float, tube: float, centre_radius: float) -> tuple[float, float]:
+    """Return the ``(circumferential, meridional)`` relative radii of a groove.
+
+    A ball of radius ``ball`` in a groove of tube radius ``tube`` on a race of
+    centre radius ``centre_radius``: the meridional direction is conformal and
+    concave (``1/Rs - 1/r``), the circumferential one convex (``1/Rs + 1/R0``).
+    """
+    radius_x = 1.0 / (1.0 / ball + 1.0 / centre_radius)
+    radius_y = 1.0 / (1.0 / ball - 1.0 / tube)
+    return radius_x, radius_y
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +319,66 @@ def solve_rough() -> tuple[Panel, Panel, dict[str, float]]:
     return smooth_panel, rough_panel, {"peak": float(rough.max_pressure)}
 
 
+def solve_gothic() -> tuple[dict[str, NDArray[np.float64]], dict[str, float]]:
+    """Gothic-arch bearing groove: a ball riding the two flanks of an ogival race.
+
+    An applied example built from the validated elliptic primitive. A ball is
+    pressed into a conformal groove (``r/Rs = 1.04``, a textbook bearing
+    conformity) whose cross-section is two arcs (two tori overlaid). The single
+    arc (no shim) gives one elliptic patch; shimming the arc centres apart splits
+    it into two flank contacts, each an elliptic Hertz contact at half the load.
+    Both are solved at the *same* load so the split — and its lower peak — show.
+    """
+    ball, tube, centre_radius, e_star = 4.0e-3, 4.16e-3, 15.0e-3, 100.0e9
+    load, shim = 800.0, 65.0e-6
+    radius_x, radius_y = gothic_radii(ball, tube, centre_radius)
+
+    # Per-flank (half load) and single-arc (full load) analytic elliptic Hertz.
+    ax_a, ay_a, p0_flank = hertz_elliptic(radius_x, radius_y, load / 2.0, e_star)
+    _, ay_single, p0_single = hertz_elliptic(radius_x, radius_y, load, e_star)
+    y0 = shim * ball / (tube - ball)
+
+    spacing = ax_a / 16.0
+    half_x = 3.0 * ax_a
+    half_y = y0 + ay_a + 3.0 * ax_a
+    nx = math.ceil(2.0 * half_x / spacing)
+    ny = math.ceil(2.0 * half_y / spacing)
+    nx += nx & 1
+    ny += ny & 1
+
+    common = {
+        "sphere_radius": ball,
+        "tube_radius": tube,
+        "centre_radius": centre_radius,
+        "load": load,
+        "e_star": e_star,
+        "grid": (nx, ny),
+        "domain": (nx * spacing, ny * spacing),
+        "tol": 1e-9,
+        "max_iter": 40000,
+    }
+    gothic = hertzian.solve_sphere_in_gothic_arch(centre_offset=shim, **common)
+    single = hertzian.solve_sphere_in_gothic_arch(centre_offset=0.0, **common)
+
+    fields = {
+        "x": _centred_axis(nx, spacing),
+        "y": _centred_axis(ny, spacing),
+        "gothic": np.asarray(gothic.pressure),
+        "single": np.asarray(single.pressure),
+    }
+    meta = {
+        "ax": ax_a,
+        "ay": ay_a,
+        "ay_single": ay_single,
+        "p0_flank": p0_flank,
+        "p0_single": p0_single,
+        "y0": y0,
+        "load": load,
+        "shim": shim,
+    }
+    return fields, meta
+
+
 # --------------------------------------------------------------------------- #
 # Figures.
 # --------------------------------------------------------------------------- #
@@ -451,6 +528,79 @@ def figure_roughness() -> None:
     _save(fig, "roughness.png")
 
 
+def figure_gothic() -> None:
+    """Gothic-arch groove: the two-flank pressure field + a meridional cut.
+
+    Top: the contact pressure field, split into two flank patches at ``y = ±y0``
+    with the analytic per-flank elliptic contact ellipses overlaid. Bottom: the
+    meridional pressure cut at ``x = 0`` showing the solver's two flank peaks
+    landing on the analytic half-load elliptic-Hertz semi-ellipses, beside the
+    single-arc (no shim) full-load contact whose lone, higher peak the split
+    replaces.
+    """
+    fields, meta = solve_gothic()
+    y, x = fields["y"], fields["x"]
+    gothic, single = fields["gothic"], fields["single"]
+    ax_a, ay_a, y0 = meta["ax"], meta["ay"], meta["y0"]
+    p0_flank, p0_single = meta["p0_flank"], meta["p0_single"]
+
+    fig, (ax_field, ax_prof) = plt.subplots(2, 1, figsize=(9.6, 6.4))
+
+    # Field, oriented with the groove cross-section (meridional y) horizontal.
+    extent = (float(y[0] * MM), float(y[-1] * MM), float(x[0] * MM), float(x[-1] * MM))
+    image = ax_field.imshow(
+        gothic * MPA,
+        origin="lower",
+        extent=extent,
+        aspect="equal",
+        cmap=PRESSURE_CMAP,
+        vmin=0.0,
+        vmax=p0_single * MPA,
+    )
+    theta = np.linspace(0.0, 2.0 * math.pi, 256)
+    for centre in (y0, -y0):
+        ax_field.plot(
+            (centre + ay_a * np.cos(theta)) * MM,
+            ax_a * np.sin(theta) * MM,
+            ls="--",
+            lw=1.3,
+            color=REFERENCE_COLOUR,
+        )
+    ax_field.set_xlabel("y (mm) — across the groove (meridional)")
+    ax_field.set_ylabel("x (mm) — along")
+    ax_field.set_title("Gothic-arch groove — ball rides two flanks", fontweight="bold", fontsize=11)
+    bar = fig.colorbar(image, ax=ax_field, fraction=0.046, pad=0.04)
+    bar.set_label("pressure (MPa)", fontsize=9)
+
+    # Meridional cut at x = 0: solver vs analytic, Gothic (two flanks) vs single.
+    i0 = gothic.shape[0] // 2
+    ax_prof.plot(y * MM, single[i0, :] * MPA, color="0.6", lw=1.6, label="single arc (no shim)")
+    ax_prof.scatter(
+        y * MM, gothic[i0, :] * MPA, s=9, c="#ef6c00", alpha=0.7, label="Gothic arch (solver)"
+    )
+    for centre in (y0, -y0):
+        s = np.linspace(centre - ay_a, centre + ay_a, 200)
+        ax_prof.plot(
+            s * MM,
+            p0_flank * MPA * np.sqrt(np.clip(1.0 - ((s - centre) / ay_a) ** 2, 0.0, None)),
+            color=REFERENCE_COLOUR,
+            lw=2.0,
+        )
+    ax_prof.plot([], [], color=REFERENCE_COLOUR, lw=2.0, label="analytic flank (Hertz, P/2)")
+    ax_prof.axhline(p0_single * MPA, ls=":", c="0.6", lw=1.2, label="single-arc peak (Hertz, P)")
+    ax_prof.set_xlabel("y (mm) — across the groove")
+    ax_prof.set_ylabel("pressure (MPa)")
+    ax_prof.set_title(
+        "Meridional cut: the split halves the load and lowers the peak",
+        fontweight="bold",
+        fontsize=11,
+    )
+    ax_prof.grid(visible=True, alpha=0.3)
+    ax_prof.legend(frameon=False, fontsize=8, loc="upper right")
+
+    _save(fig, "gothic.png")
+
+
 def figure_hero() -> None:
     """One banner row: the pressure field of each solved problem."""
     circular, _ = solve_circular()
@@ -501,6 +651,7 @@ def main() -> None:
     figure_elliptic()
     figure_cone()
     figure_roughness()
+    figure_gothic()
     print("done.")
 
 

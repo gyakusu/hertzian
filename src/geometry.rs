@@ -336,11 +336,206 @@ fn combined_radius(radius_1: f64, radius_2: f64) -> f64 {
     1.0 / (1.0 / radius_1 + 1.0 / radius_2)
 }
 
+/// Conformal (concave) relative radius of a ball in a groove, `1/R = 1/Rs - 1/r`.
+///
+/// A ball of radius `Rs` nestled in a concave tube of radius `r > Rs` has the
+/// large effective radius `Rs r / (r - Rs)`: as the groove osculates the ball
+/// (`r -> Rs`) the relative radius diverges and the contact becomes increasingly
+/// conformal. Requires `r > Rs`, the precondition for a finite conformal contact.
+fn conformal_radius(ball_radius: f64, tube_radius: f64) -> f64 {
+    1.0 / (1.0 / ball_radius - 1.0 / tube_radius)
+}
+
+/// A Gothic-arch (ogival) groove: two equal tori whose centre circles are
+/// displaced symmetrically off a shared reference centre circle.
+///
+/// A ball-bearing race is often ground not as a single arc but as two arcs of
+/// equal radius whose centres are shifted apart by a small "shim" on either side
+/// of the groove centre-line, giving the pointed, ogival "Gothic arch" profile. A
+/// ball pressed into it rides on the two flanks instead of the bottom, so the
+/// single conformal contact splits into two — which is the whole point of the
+/// design (it fixes the contact angle and resists axial play).
+///
+/// Both tori share the tube radius `r` (the groove radius) and a reference
+/// centre-circle radius `R0`; the ball centre sits on that reference circle. The
+/// two real tori centre circles are displaced by `±centre_offset` from it, so
+/// `centre_offset` is exactly the offset of each torus centre curve from the
+/// reference torus. `centre_offset = 0` recovers an ordinary single-arc
+/// (circular-arch) groove.
+///
+/// Like [`Torus`], this is a geometry descriptor, not a [`Gap`] on its own: the
+/// contacting sphere is supplied by [`GothicArchGroove::against_sphere`], which
+/// reduces the ball-in-groove pair to the [`GothicArchProfile`] gap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GothicArchGroove {
+    tube_radius: f64,
+    centre_radius: f64,
+    centre_offset: f64,
+}
+
+impl GothicArchGroove {
+    /// Builds a Gothic-arch groove from its tube radius `r`, reference
+    /// centre-circle radius `R0`, and per-torus centre offset.
+    ///
+    /// # Panics
+    /// Panics if `tube_radius` or `centre_radius` is not strictly positive and
+    /// finite, or if `centre_offset` is negative or non-finite (`0` is allowed
+    /// and yields a single-arc groove).
+    #[must_use]
+    pub fn new(tube_radius: f64, centre_radius: f64, centre_offset: f64) -> Self {
+        assert!(
+            tube_radius > 0.0
+                && centre_radius > 0.0
+                && tube_radius.is_finite()
+                && centre_radius.is_finite(),
+            "groove tube and centre radii must be positive and finite",
+        );
+        assert!(
+            centre_offset >= 0.0 && centre_offset.is_finite(),
+            "groove centre offset must be non-negative and finite",
+        );
+        Self {
+            tube_radius,
+            centre_radius,
+            centre_offset,
+        }
+    }
+
+    /// The tube (groove) radius `r`.
+    #[must_use]
+    pub const fn tube_radius(&self) -> f64 {
+        self.tube_radius
+    }
+
+    /// The reference centre-circle radius `R0`.
+    #[must_use]
+    pub const fn centre_radius(&self) -> f64 {
+        self.centre_radius
+    }
+
+    /// The offset of each torus centre curve from the reference centre circle.
+    #[must_use]
+    pub const fn centre_offset(&self) -> f64 {
+        self.centre_offset
+    }
+
+    /// The undeformed gap of a sphere of radius `R_s` pressed into the groove.
+    ///
+    /// Reduces the ball-in-groove contact to its principal relative radii: the
+    /// conformal meridional radius `R_y = 1/(1/R_s - 1/r)` (concave groove) and
+    /// the circumferential radius `R_x = 1/(1/R_s + 1/R0)` (convex race). The
+    /// meridional centre offset of each flank contact is the geometric offset
+    /// amplified by the conformity, `y0 = centre_offset · R_s / (r - R_s)`: a tiny
+    /// shim produces a large flank separation, which is why Gothic grooves are so
+    /// sensitive to it. The resulting [`GothicArchProfile`] is the double-welled
+    /// gap the solver sees.
+    ///
+    /// # Panics
+    /// Panics if `sphere_radius` is not strictly positive and finite, or if it is
+    /// not strictly smaller than the tube radius (a conformal groove contact
+    /// exists only for a ball narrower than the groove).
+    #[must_use]
+    pub fn against_sphere(&self, sphere_radius: f64) -> GothicArchProfile {
+        assert!(
+            sphere_radius > 0.0 && sphere_radius.is_finite(),
+            "sphere radius must be positive and finite",
+        );
+        assert!(
+            sphere_radius < self.tube_radius,
+            "ball must be narrower than the groove (sphere_radius < tube_radius) for a conformal contact",
+        );
+        let radius_y = conformal_radius(sphere_radius, self.tube_radius);
+        let radius_x = combined_radius(sphere_radius, self.centre_radius);
+        let offset = self.centre_offset * sphere_radius / (self.tube_radius - sphere_radius);
+        GothicArchProfile::new(radius_x, radius_y, offset)
+    }
+}
+
+/// The undeformed gap of a sphere pressed into a [`GothicArchGroove`].
+///
+/// A double-welled paraboloid
+/// `h(x, y) = x^2 / (2 R_x) + (|y| - y0)^2 / (2 R_y)`: a single parabola across
+/// the circumferential `x` (effective radius `R_x`), and *two* meridional wells
+/// at `y = ±y0` joined by a ridge at the groove centre — the Gothic point, where
+/// the gap is `y0^2 / (2 R_y)` and the ball never touches. Each well is locally
+/// an elliptic-contact paraboloid of relative radii `(R_x, R_y)`, so a separated
+/// Gothic contact is a pair of elliptic Hertz contacts sharing the load. With
+/// `y0 = 0` the two wells merge and it is an ordinary [`Paraboloid`].
+///
+/// This is the geometric superposition the name promises: it equals the pointwise
+/// minimum of two [`Paraboloid`]s offset to `y = ±y0` (the surface closest to the
+/// ball wins), i.e. two tori overlaid into one concave groove.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GothicArchProfile {
+    radius_x: f64,
+    radius_y: f64,
+    offset: f64,
+}
+
+impl GothicArchProfile {
+    /// Builds the profile from the circumferential and meridional relative radii
+    /// and the meridional flank offset `y0`.
+    ///
+    /// # Panics
+    /// Panics if either radius is not strictly positive and finite, or if
+    /// `offset` is negative or non-finite.
+    #[must_use]
+    pub fn new(radius_x: f64, radius_y: f64, offset: f64) -> Self {
+        assert!(
+            radius_x > 0.0 && radius_y > 0.0 && radius_x.is_finite() && radius_y.is_finite(),
+            "profile relative radii must be positive and finite",
+        );
+        assert!(
+            offset >= 0.0 && offset.is_finite(),
+            "profile flank offset must be non-negative and finite",
+        );
+        Self {
+            radius_x,
+            radius_y,
+            offset,
+        }
+    }
+
+    /// The circumferential relative radius `R_x` (the `x` well).
+    #[must_use]
+    pub const fn radius_x(&self) -> f64 {
+        self.radius_x
+    }
+
+    /// The meridional relative radius `R_y` (each flank well).
+    #[must_use]
+    pub const fn radius_y(&self) -> f64 {
+        self.radius_y
+    }
+
+    /// The meridional offset `y0` of each flank contact from the groove centre.
+    #[must_use]
+    pub const fn offset(&self) -> f64 {
+        self.offset
+    }
+}
+
+impl Gap for GothicArchProfile {
+    fn sample(&self, grid: &Grid) -> Array2<f64> {
+        let half_curvature_x = 0.5 / self.radius_x;
+        let half_curvature_y = 0.5 / self.radius_y;
+        let offset = self.offset;
+        grid.sample(|x, y| {
+            // The meridional well follows the nearer flank: |y| folds the two
+            // offset parabolas into a single ridge-at-centre profile.
+            let dy = y.abs() - offset;
+            half_curvature_x * x * x + half_curvature_y * dy * dy
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ndarray::Array2;
 
-    use super::{Cone, Gap, HeightField, Paraboloid, Torus, Waviness};
+    use super::{
+        Cone, Gap, GothicArchGroove, GothicArchProfile, HeightField, Paraboloid, Torus, Waviness,
+    };
     use crate::grid::Grid;
 
     #[test]
@@ -437,6 +632,98 @@ mod tests {
             mean.abs() <= 1e-2 * amplitude,
             "roughness is near zero-mean"
         );
+    }
+
+    #[test]
+    fn gothic_groove_conformity_amplifies_a_tiny_centre_offset() {
+        // r/Rs = 1.04 is a textbook bearing conformity (groove radius 52% of the
+        // ball diameter). The meridional relative radius is hugely conformal and
+        // a small centre shim is amplified into a large flank offset.
+        let ball = 3.5e-3;
+        let tube = 1.04 * ball;
+        let groove = GothicArchGroove::new(tube, 12.0e-3, 40.0e-6);
+        let profile = groove.against_sphere(ball);
+
+        // Meridional conformal radius 1/(1/Rs - 1/r) = Rs r / (r - Rs) = 26 Rs.
+        assert!((profile.radius_y() - ball * 1.04 / 0.04).abs() <= 1e-9 * profile.radius_y());
+        // Circumferential radius is the convex-convex combination, below Rs.
+        assert!(profile.radius_x() < ball);
+        // The flank offset is the shim amplified by Rs / (r - Rs) = 25x here.
+        let amplification = ball / (tube - ball);
+        assert!((profile.offset() - 40.0e-6 * amplification).abs() <= 1e-12);
+        assert!(
+            profile.offset() > 20.0 * 40.0e-6,
+            "offset must be amplified"
+        );
+    }
+
+    #[test]
+    fn gothic_groove_gap_has_a_central_ridge_between_two_wells() {
+        // The Gothic point: the gap is a local *maximum* at the groove centre and
+        // dips to zero at the two flanks y = ±y0, so a pressed ball bridges the
+        // ridge and touches the flanks rather than the bottom.
+        let profile = GothicArchProfile::new(2.5e-3, 90.0e-3, 0.30e-3);
+        let grid = Grid::square(401, 5.0e-6); // ±1 mm, resolves y0 = 0.30 mm
+        let gap = profile.sample(&grid);
+        let centre = 200; // middle index of a 401-point axis
+
+        let ridge = gap[[centre, centre]]; // (x, y) = (0, 0): the Gothic point
+        let flank = gap[[centre, centre + 60]]; // y = +0.30 mm = y0: a well floor
+        assert!(
+            (ridge - 0.30e-3 * 0.30e-3 / (2.0 * 90.0e-3)).abs() <= 1e-12,
+            "ridge height must be y0^2 / (2 Ry)",
+        );
+        assert!(flank.abs() <= 1e-12, "the flank well floor must vanish");
+        assert!(ridge > flank, "the centre must ride above the flank wells");
+        // Symmetric wells: y = -y0 matches y = +y0.
+        assert!((gap[[centre, centre - 60]] - flank).abs() <= 1e-15);
+    }
+
+    #[test]
+    fn gothic_groove_reduces_to_a_paraboloid_without_an_offset() {
+        // With no centre shim the two wells merge: the gap is exactly the
+        // single-arc elliptic-contact paraboloid of the same relative radii.
+        let groove = GothicArchGroove::new(1.04 * 4.0e-3, 15.0e-3, 0.0);
+        let profile = groove.against_sphere(4.0e-3);
+        assert!(profile.offset().abs() <= 1e-18, "no offset => no split");
+
+        let grid = Grid::square(64, 1.0e-5);
+        let gothic = profile.sample(&grid);
+        let paraboloid = Paraboloid::new(profile.radius_x(), profile.radius_y()).sample(&grid);
+        let max_diff = (&gothic - &paraboloid)
+            .iter()
+            .fold(0.0_f64, |m, &v| m.max(v.abs()));
+        assert!(max_diff <= 1e-18, "offset-free Gothic gap is a paraboloid");
+    }
+
+    #[test]
+    fn gothic_groove_gap_is_the_minimum_of_two_offset_paraboloids() {
+        // The "two tori overlaid" promise: the groove gap equals the pointwise
+        // minimum of two paraboloids shifted to y = ±y0 (closest surface wins).
+        let profile = GothicArchProfile::new(3.0e-3, 80.0e-3, 0.25e-3);
+        let grid = Grid::square(48, 2.0e-5);
+        let gothic = profile.sample(&grid);
+
+        let half_x = 0.5 / profile.radius_x();
+        let half_y = 0.5 / profile.radius_y();
+        let y0 = profile.offset();
+        let expected = grid.sample(|x, y| {
+            let well_plus = half_x * x * x + half_y * (y - y0) * (y - y0);
+            let well_minus = half_x * x * x + half_y * (y + y0) * (y + y0);
+            well_plus.min(well_minus)
+        });
+        let max_diff = (&gothic - &expected)
+            .iter()
+            .fold(0.0_f64, |m, &v| m.max(v.abs()));
+        assert!(max_diff <= 1e-18, "Gothic gap must be the min of two wells");
+    }
+
+    #[test]
+    #[should_panic(expected = "ball must be narrower than the groove")]
+    fn gothic_groove_rejects_a_ball_wider_than_the_groove() {
+        // A ball at least as wide as the groove has no conformal contact.
+        let groove = GothicArchGroove::new(4.0e-3, 15.0e-3, 0.1e-3);
+        let _ = groove.against_sphere(4.0e-3);
     }
 
     #[test]

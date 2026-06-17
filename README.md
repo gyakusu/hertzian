@@ -111,6 +111,18 @@ sol = hertzian.solve_sphere_on_torus(
 )
 print(sol.contact_half_widths, sol.ellipticity)
 
+# Applied example: a ball pressed into a Gothic-arch (ogival) bearing groove —
+# two arcs (two tori) overlaid, conformity r/Rs = 1.04. A non-zero centre_offset
+# (the arc-centre shim) makes the ball ride two flanks: the contact splits in
+# two. centre_offset=0 recovers a single conformal elliptic contact. Tall domain
+# along the split (meridional y) axis.
+sol = hertzian.solve_sphere_in_gothic_arch(
+    sphere_radius=4e-3, tube_radius=4.16e-3, centre_radius=15e-3,
+    centre_offset=65e-6, load=800.0, e_star=100e9,
+    grid=(96, 846), domain=(0.65e-3, 5.74e-3),
+)
+print(sol.max_pressure)  # two flank patches, each an elliptic Hertz contact at P/2
+
 # General entry point (P4): an arbitrary undeformed-gap height field h(x, y) —
 # any shape, optionally with roughness added on top. Build the gap on a centred
 # uniform grid and hand it to the solver.
@@ -195,6 +207,44 @@ and against Tamaas (next section).
 > render-only dependency, deliberately kept out of the locked environment — like
 > the Tamaas cross-validation below — so its release cadence can never break the
 > core pipeline.
+
+---
+
+## Applied example — a Gothic-arch bearing groove / ゴシックアーチ溝
+
+ボールベアリングの軌道溝は、単一円弧ではなく**中心をずらした2つの円弧**（=2トーラスを
+重ねた凹面）で研削されることが多く、尖頭のオージー形＝**ゴシックアーチ**になります。
+玉はこの溝の底ではなく**2つのフランクに乗り**、接触は2点に**分裂**します。これは新しい
+ソルバ機能ではなく、検証済みの**楕円接触プリミティブの応用**で、`r/Rs = 1.04`（玉径に
+対する溝半径52%という教科書的な保形度）の保形接触です。
+
+A ball-bearing race is often ground not as one arc but as **two arcs with
+offset centres** — two tori overlaid into one concave groove, giving the pointed,
+ogival **Gothic arch**. A ball rides the **two flanks** rather than the bottom, so
+the contact **splits in two**. This is not a new solver capability but an
+**application of the validated elliptic primitive**, at a conformal `r/Rs = 1.04`
+(groove radius 52 % of the ball diameter — a textbook bearing conformity).
+
+![Gothic-arch groove: a contact pressure field split into two elliptic flank patches at y = ±y0 with a contact-free Gothic point between them, and a meridional cut showing the solver's two flank peaks landing on the analytic half-load elliptic-Hertz semi-ellipses below the single-arc full-load peak.](docs/img/gothic.png)
+
+The groove gap reduces to the double-welled
+`h(x, y) = x²/(2 R_x) + (|y| − y₀)²/(2 R_y)` — two offset elliptic paraboloids,
+the surface closest to the ball winning — with a **conformal** meridional radius
+`R_y = 1/(1/Rs − 1/r)` (concave groove), a convex circumferential radius
+`R_x = 1/(1/Rs + 1/R₀)`, and a flank offset `y₀ = centre_offset · Rs/(r − Rs)`:
+the tiny arc-centre shim is **amplified ~25×** by the conformity, so a 65 µm shim
+throws the flanks ±1.6 mm apart. At the *same* total load the single arc
+(`centre_offset = 0`) makes one elliptic patch; the Gothic shim splits it into two.
+
+The split is **load-conserving and self-validating**: each flank is an elliptic
+Hertz contact carrying **half** the load, so its peak lands on the **same closed
+form the P2 benchmark uses** — here `p₀ ≈ 1.74 GPa`, matching the elliptic-Hertz
+gallery panel, and exactly `(1/2)^{1/3} ≈ 0.79×` the single-arc peak (`≈ 2.19 GPa`).
+The Gothic point at `y = 0` carries no load. The numbers above (`Rs = 4 mm`,
+`r = 4.16 mm`, `R₀ = 15 mm`, `E* = 100 GPa`, `P = 800 N`) are tuned so the flank
+pressure sits in the gallery's GPa range; the per-flank equivalence to elliptic
+Hertz at `P/2` and the contact-free ridge are pinned in the Rust scenario tests
+and the Python binding tests.
 
 ---
 
