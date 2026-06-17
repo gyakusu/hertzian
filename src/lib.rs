@@ -39,7 +39,9 @@ pub mod solution;
 pub mod solver;
 pub mod validation;
 
-pub use geometry::{Cone, Gap, HeightField, Paraboloid, Sum, Torus, Waviness};
+pub use geometry::{
+    Cone, Gap, GothicArchGroove, GothicArchProfile, HeightField, Paraboloid, Sum, Torus, Waviness,
+};
 pub use grid::Grid;
 pub use influence::{DirectSum, FreeSpaceBoussinesq, InfluenceOperator};
 pub use material::Material;

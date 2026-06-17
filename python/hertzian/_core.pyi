@@ -76,6 +76,19 @@ def solve_sphere_on_torus(
     tol: float = ...,
     max_iter: int = ...,
 ) -> Solution: ...
+def solve_sphere_in_gothic_arch(
+    *,
+    sphere_radius: float,
+    tube_radius: float,
+    centre_radius: float,
+    centre_offset: float,
+    load: float,
+    e_star: float,
+    grid: tuple[int, int],
+    domain: float | tuple[float, float],
+    tol: float = ...,
+    max_iter: int = ...,
+) -> Solution: ...
 def solve_height_field(
     *,
     gap: NDArray[np.float64],

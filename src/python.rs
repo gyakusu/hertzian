@@ -21,10 +21,12 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::geometry::Torus;
+use crate::geometry::{GothicArchGroove, Torus};
 use crate::grid::Grid;
 use crate::material::Material;
-use crate::scenarios::{solve_sampled_gap, sphere_on_flat, sphere_on_sphere, sphere_on_torus};
+use crate::scenarios::{
+    solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat, sphere_on_sphere, sphere_on_torus,
+};
 use crate::solution::{Diagnostics as CoreDiagnostics, Solution as CoreSolution};
 use crate::solver::Config;
 
@@ -39,6 +41,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(solve_sphere_on_flat, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_sphere, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_torus, module)?)?;
+    module.add_function(wrap_pyfunction!(solve_sphere_in_gothic_arch, module)?)?;
     module.add_function(wrap_pyfunction!(solve_height_field, module)?)?;
     Ok(())
 }
@@ -263,6 +266,52 @@ fn solve_sphere_on_torus(
     Ok(Solution::wrap(solution))
 }
 
+/// Solve a sphere pressed into a Gothic-arch (ogival) groove.
+///
+/// The concave counterpart of [`solve_sphere_on_torus`]: the ball sits inside a
+/// conformal groove built from two arcs of tube radius `tube_radius` (`r`) whose
+/// centre circles are displaced by `±centre_offset` from a reference circle of
+/// radius `centre_radius` (`R0`), on which the ball centre sits. With a non-zero
+/// offset the ball rides on the two flanks and the contact splits into a pair of
+/// elliptic patches; `centre_offset = 0` recovers a single conformal elliptic
+/// contact.
+#[pyfunction]
+#[pyo3(signature = (*, sphere_radius, tube_radius, centre_radius, centre_offset, load, e_star, grid, domain, tol = 1.0e-8, max_iter = 10_000))]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "PyO3 extracts every keyword argument by value; the rich solver API needs many"
+)]
+fn solve_sphere_in_gothic_arch(
+    py: Python<'_>,
+    sphere_radius: f64,
+    tube_radius: f64,
+    centre_radius: f64,
+    centre_offset: f64,
+    load: f64,
+    e_star: f64,
+    grid: (usize, usize),
+    domain: Bound<'_, PyAny>,
+    tol: f64,
+    max_iter: usize,
+) -> PyResult<Solution> {
+    require_positive(sphere_radius, "sphere_radius")?;
+    require_positive(tube_radius, "tube_radius")?;
+    require_positive(centre_radius, "centre_radius")?;
+    require_non_negative(centre_offset, "centre_offset")?;
+    if sphere_radius >= tube_radius {
+        return Err(PyValueError::new_err(format!(
+            "sphere_radius ({sphere_radius}) must be smaller than tube_radius ({tube_radius}) for a conformal groove contact"
+        )));
+    }
+    let (material, config) = prepare(load, e_star, tol, max_iter)?;
+    let grid = build_grid(grid, &domain)?;
+    let groove = GothicArchGroove::new(tube_radius, centre_radius, centre_offset);
+    let solution = py
+        .detach(move || sphere_in_gothic_arch(sphere_radius, groove, load, material, grid, config));
+    Ok(Solution::wrap(solution))
+}
+
 /// Solve the contact for an arbitrary gap height field `h(x, y)` (design §8.5).
 ///
 /// `gap` is a 2-D ``float64`` array of the undeformed surface separation on a
@@ -374,6 +423,16 @@ fn require_positive(value: f64, name: &str) -> PyResult<()> {
     } else {
         Err(PyValueError::new_err(format!(
             "{name} must be positive and finite, got {value}"
+        )))
+    }
+}
+
+fn require_non_negative(value: f64, name: &str) -> PyResult<()> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{name} must be non-negative and finite, got {value}"
         )))
     }
 }
