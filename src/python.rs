@@ -271,10 +271,11 @@ fn solve_sphere_on_torus(
 /// The concave counterpart of [`solve_sphere_on_torus`]: the ball sits inside a
 /// conformal groove built from two arcs of tube radius `tube_radius` (`r`) whose
 /// centre circles are displaced by `±centre_offset` from a reference circle of
-/// radius `centre_radius` (`R0`), on which the ball centre sits. With a non-zero
-/// offset the ball rides on the two flanks and the contact splits into a pair of
-/// elliptic patches; `centre_offset = 0` recovers a single conformal elliptic
-/// contact.
+/// radius `centre_radius` (`R0`), on which the ball centre sits. With a large
+/// offset the ball rides on two well-separated flanks and the contact splits into
+/// a pair of elliptic patches; a smaller offset brings those patches into a
+/// partial overlap (a single connected contact); `centre_offset = 0` recovers a
+/// single conformal elliptic contact.
 #[pyfunction]
 #[pyo3(signature = (*, sphere_radius, tube_radius, centre_radius, centre_offset, load, e_star, grid, domain, tol = 1.0e-8, max_iter = 10_000))]
 #[allow(

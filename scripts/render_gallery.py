@@ -10,10 +10,14 @@ against:
 * **rough contact** -- a sphere plus cosine roughness, which fragments the patch
   into asperities (P4).
 
-It also renders one **applied example** built from these primitives:
+It also renders an **applied example** built from these primitives, in two
+shim settings:
 
-* **Gothic-arch groove** -- a ball in a two-arc ogival bearing race, whose
-  contact splits into two flanks, each an elliptic Hertz contact at half the load.
+* **Gothic-arch groove (separated)** -- a ball in a two-arc ogival bearing race,
+  whose contact splits into two flanks, each an elliptic Hertz contact at half the
+  load, with a contact-free Gothic point between them; and
+* **Gothic-arch groove (overlapping)** -- the same race with a tightened shim, so
+  the two flank contact ellipses overlap by half into a single connected patch.
 
 The analytic Hertz / Sneddon closed forms are re-implemented here (independently
 of the Rust core) so each panel shows the solver landing on its reference rather
@@ -379,6 +383,67 @@ def solve_gothic() -> tuple[dict[str, NDArray[np.float64]], dict[str, float]]:
     return fields, meta
 
 
+def solve_gothic_overlap() -> tuple[dict[str, NDArray[np.float64]], dict[str, float]]:
+    """Gothic-arch groove, tuned shim: the two flank ellipses overlap by half.
+
+    The companion of :func:`solve_gothic`. The same conformal groove, but the
+    arc-centre shim is tightened so the two flank contacts no longer leave a
+    contact-free Gothic point between them — instead their contact ellipses
+    *overlap by half*. The design target is the meridional flank offset
+    ``y0 = b / 2``, with ``b`` the meridional semi-axis of one isolated half-load
+    elliptic flank: two ellipses of semi-axis ``b`` whose centres sit ``b`` apart
+    share exactly half their extent. The overlap fills in the former Gothic point
+    (a single *connected* patch) and the two flanks reinforce each other, so the
+    peak rises above the well-separated ``(1/2)^(1/3)`` value while staying below
+    the merged single-arc one.
+    """
+    ball, tube, centre_radius, e_star = 4.0e-3, 4.16e-3, 15.0e-3, 100.0e9
+    load = 800.0
+    radius_x, radius_y = gothic_radii(ball, tube, centre_radius)
+
+    ax_a, ay_a, p0_flank = hertz_elliptic(radius_x, radius_y, load / 2.0, e_star)
+    _, _, p0_single = hertz_elliptic(radius_x, radius_y, load, e_star)
+    y0 = 0.5 * ay_a  # half overlap: flank centres one meridional semi-axis apart
+    shim = y0 * (tube - ball) / ball
+
+    spacing = ax_a / 16.0
+    half_x = 3.0 * ax_a
+    half_y = y0 + ay_a + 3.0 * ax_a
+    nx = math.ceil(2.0 * half_x / spacing)
+    ny = math.ceil(2.0 * half_y / spacing)
+    nx += nx & 1
+    ny += ny & 1
+
+    sol = hertzian.solve_sphere_in_gothic_arch(
+        sphere_radius=ball,
+        tube_radius=tube,
+        centre_radius=centre_radius,
+        centre_offset=shim,
+        load=load,
+        e_star=e_star,
+        grid=(nx, ny),
+        domain=(nx * spacing, ny * spacing),
+        tol=1e-9,
+        max_iter=40000,
+    )
+
+    fields = {
+        "x": _centred_axis(nx, spacing),
+        "y": _centred_axis(ny, spacing),
+        "overlap": np.asarray(sol.pressure),
+    }
+    meta = {
+        "ax": ax_a,
+        "ay": ay_a,
+        "p0_flank": p0_flank,
+        "p0_single": p0_single,
+        "y0": y0,
+        "shim": shim,
+        "peak": float(sol.max_pressure),
+    }
+    return fields, meta
+
+
 # --------------------------------------------------------------------------- #
 # Figures.
 # --------------------------------------------------------------------------- #
@@ -601,6 +666,106 @@ def figure_gothic() -> None:
     _save(fig, "gothic.png")
 
 
+def figure_gothic_overlap() -> None:
+    """Gothic-arch groove, tuned shim: the two flank ellipses overlap by half.
+
+    Top: the *connected* pressure field with the two nominal flank contact
+    ellipses (centres ``±y0 = ±b/2``) overlaid — overlapping by half along the
+    meridional axis. Bottom: the meridional cut at ``x = 0``, the solver's two
+    peaks joined by an in-contact saddle (the former Gothic point now carries
+    load), riding above the isolated half-load flank semi-ellipses through the
+    shaded overlap band where the two flanks reinforce one another, yet still
+    capped below the single full-load arc.
+    """
+    fields, meta = solve_gothic_overlap()
+    y, x = fields["y"], fields["x"]
+    overlap = fields["overlap"]
+    ax_a, ay_a, y0 = meta["ax"], meta["ay"], meta["y0"]
+    p0_flank, p0_single = meta["p0_flank"], meta["p0_single"]
+    overlap_half = ay_a - y0  # the two flank ellipses share |y| < b - y0 = b/2
+    view = (y0 + ay_a + 2.0 * ax_a) * MM
+
+    fig, (ax_field, ax_prof) = plt.subplots(2, 1, figsize=(9.6, 6.4))
+
+    # Field, oriented with the groove cross-section (meridional y) horizontal.
+    extent = (float(y[0] * MM), float(y[-1] * MM), float(x[0] * MM), float(x[-1] * MM))
+    image = ax_field.imshow(
+        overlap * MPA,
+        origin="lower",
+        extent=extent,
+        aspect="equal",
+        cmap=PRESSURE_CMAP,
+        vmin=0.0,
+        vmax=p0_single * MPA,
+    )
+    theta = np.linspace(0.0, 2.0 * math.pi, 256)
+    for centre in (y0, -y0):
+        ax_field.plot(
+            (centre + ay_a * np.cos(theta)) * MM,
+            ax_a * np.sin(theta) * MM,
+            ls="--",
+            lw=1.3,
+            color=REFERENCE_COLOUR,
+        )
+    for edge in (-overlap_half, overlap_half):
+        ax_field.axvline(edge * MM, ls=":", lw=1.0, color="white", alpha=0.7)
+    ax_field.scatter(
+        [y0 * MM, -y0 * MM], [0.0, 0.0], s=18, marker="+", color="white", linewidths=1.2
+    )
+    ax_field.set_xlim(-view, view)
+    ax_field.set_xlabel("y (mm) — across the groove (meridional)")
+    ax_field.set_ylabel("x (mm) — along")
+    ax_field.set_title(
+        "Tuned shim — the two flank ellipses overlap by half",
+        fontweight="bold",
+        fontsize=11,
+    )
+    bar = fig.colorbar(image, ax=ax_field, fraction=0.046, pad=0.04)
+    bar.set_label("pressure (MPa)", fontsize=9)
+
+    # Meridional cut at x = 0: the solver field over the overlapping flanks.
+    i0 = overlap.shape[0] // 2
+    ax_prof.axvspan(
+        -overlap_half * MM,
+        overlap_half * MM,
+        color="0.85",
+        label="overlap (½ of each flank)",
+    )
+    for centre in (y0, -y0):
+        s = np.linspace(centre - ay_a, centre + ay_a, 200)
+        ax_prof.plot(
+            s * MM,
+            p0_flank * MPA * np.sqrt(np.clip(1.0 - ((s - centre) / ay_a) ** 2, 0.0, None)),
+            color=REFERENCE_COLOUR,
+            lw=1.6,
+            ls="--",
+        )
+    ax_prof.plot(
+        [], [], color=REFERENCE_COLOUR, lw=1.6, ls="--", label="isolated flank (Hertz, P/2)"
+    )
+    ax_prof.scatter(
+        y * MM,
+        overlap[i0, :] * MPA,
+        s=9,
+        c="#ef6c00",
+        alpha=0.75,
+        label="Gothic arch, tuned shim (solver)",
+    )
+    ax_prof.axhline(p0_single * MPA, ls=":", c="0.6", lw=1.2, label="single-arc peak (Hertz, P)")
+    ax_prof.set_xlim(-view, view)
+    ax_prof.set_xlabel("y (mm) — across the groove")
+    ax_prof.set_ylabel("pressure (MPa)")
+    ax_prof.set_title(
+        "Meridional cut: the flanks overlap and the Gothic point fills in",
+        fontweight="bold",
+        fontsize=11,
+    )
+    ax_prof.grid(visible=True, alpha=0.3)
+    ax_prof.legend(frameon=False, fontsize=8, loc="upper right")
+
+    _save(fig, "gothic_overlap.png")
+
+
 def figure_hero() -> None:
     """One banner row: the pressure field of each solved problem."""
     circular, _ = solve_circular()
@@ -652,6 +817,7 @@ def main() -> None:
     figure_cone()
     figure_roughness()
     figure_gothic()
+    figure_gothic_overlap()
     print("done.")
 
 

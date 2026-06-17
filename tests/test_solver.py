@@ -205,6 +205,89 @@ def test_sphere_in_gothic_arch_splits_into_two_flank_contacts() -> None:
     assert ridge <= 0.05 * peak
 
 
+def test_sphere_in_gothic_arch_half_overlapping_flanks() -> None:
+    """A tightened shim makes the two flank contact ellipses overlap by half.
+
+    The companion of the separated arch above: bringing the two arc centres
+    closer slides the flank contacts together until their ellipses overlap by
+    half — the meridional flank offset ``y0`` equals half the flank's meridional
+    semi-axis ``b``, so two ellipses of semi-axis ``b`` whose centres sit ``b``
+    apart share exactly half their extent. The single conformal patch is then
+    *connected*: the former Gothic point now carries load (the defining contrast
+    with the contact-free ridge of the separated arch), yet the two flanks stay
+    distinct as a saddle-joined pair. (The precise half-overlap geometry and the
+    cross-validation against the dense reference are pinned in the Rust scenario
+    tests; this binding test checks the connected, symmetric, saddle-joined pair
+    it produces.)
+    """
+    ball, tube, centre_radius, e_star = 4.0e-3, 4.16e-3, 15.0e-3, 100.0e9  # r/Rs = 1.04
+    load = 800.0
+    # Tall and narrow: fine across the slim circumferential (x) semi-axis, coarse
+    # along the long meridional (y) one the two flanks spread over.
+    nx, ny = 64, 260
+    domain = (0.6e-3, 4.2e-3)
+
+    # The single arc (no shim) is one full-load elliptic patch; its meridional
+    # semi-axis sets the overlap scale. The half-load flank shrinks by the Hertz
+    # P^(1/3) load-scaling, so b = (1/2)^(1/3) * a_y(single), and half overlap
+    # puts the two flank centres b apart: y0 = b / 2.
+    single = hertzian.solve_sphere_in_gothic_arch(
+        sphere_radius=ball,
+        tube_radius=tube,
+        centre_radius=centre_radius,
+        centre_offset=0.0,
+        load=load,
+        e_star=e_star,
+        grid=(nx, ny),
+        domain=domain,
+        tol=1e-9,
+        max_iter=20000,
+    )
+    a_y_single = max(single.contact_half_widths)
+    b = (0.5 ** (1.0 / 3.0)) * a_y_single
+    y0 = 0.5 * b
+    shim = y0 * (tube - ball) / ball
+
+    sol = hertzian.solve_sphere_in_gothic_arch(
+        sphere_radius=ball,
+        tube_radius=tube,
+        centre_radius=centre_radius,
+        centre_offset=shim,
+        load=load,
+        e_star=e_star,
+        grid=(nx, ny),
+        domain=domain,
+        tol=1e-9,
+        max_iter=20000,
+    )
+    assert sol.diagnostics.converged
+    assert _relative_error(sol.total_load, load) <= LOAD_RTOL
+
+    pressure = sol.pressure
+    peak = float(pressure.max())
+    y = (np.arange(ny, dtype=np.float64) - (ny - 1) / 2.0) * (domain[1] / ny)
+    mid = ny // 2
+
+    # Two symmetric flank peaks, nudged just outboard of ±y0 by the overlap.
+    upper = float(pressure[:, mid:].max())
+    lower = float(pressure[:, :mid].max())
+    assert _relative_error(upper, lower) <= FLANK_SYMMETRY_RTOL
+    j_peak = int(np.argmax(pressure)) % ny
+    assert 0.5 * y0 < abs(float(y[j_peak])) < 1.5 * y0
+
+    # Connected, not separated: the former Gothic point now carries load (the
+    # separated arch leaves it contact-free, cf. the test above), yet stays in a
+    # saddle below the flanks, so the two ellipses still read as a distinct pair.
+    gothic_point = float(pressure[:, np.abs(y) < 0.1 * y0].max())
+    assert gothic_point > 0.3 * peak
+    centre_floor = float(pressure[:, mid - 1 : mid + 1].max())
+    assert centre_floor < 0.9 * peak
+
+    # The split still lowers the peak below the single full-load arc — just less
+    # than full separation, since the overlapping flanks reinforce each other.
+    assert peak < single.max_pressure
+
+
 def test_height_field_matches_sphere_shortcut() -> None:
     """The general height-field path reproduces the sphere-on-flat shortcut.
 
