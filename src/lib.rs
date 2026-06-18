@@ -31,6 +31,7 @@ pub mod grid;
 pub mod influence;
 pub mod kernel;
 pub mod material;
+pub mod pressure;
 pub mod problem;
 mod python;
 pub mod reduced;
@@ -46,6 +47,7 @@ pub use geometry::{
 pub use grid::Grid;
 pub use influence::{DirectSum, FreeSpaceBoussinesq, InfluenceOperator};
 pub use material::Material;
+pub use pressure::FlankPressure;
 pub use problem::{Control, Problem};
 pub use reduced::{contact_half_angle, GothicArchLaw};
 pub use reference::DenseReference;

@@ -368,7 +368,11 @@ fn elliptic_curvature_ratio(eccentricity: f64) -> f64 {
 /// `k' = sqrt(1 - k^2)`, and `E = K (1 - sum_n 2^(n-1) c_n^2)` accumulated over
 /// the same AGM iteration (Abramowitz & Stegun 17.6). The iteration converges
 /// quadratically, so a handful of steps reach full `f64` precision.
-fn complete_elliptic_integrals(modulus: f64) -> (f64, f64) {
+///
+/// Shared with the reduced pressure law ([`crate::pressure`]), whose elliptic
+/// spin-moment closed form `M = (3/8) μ Q a E(e)` needs `E(e)` of the same
+/// contact eccentricity this routine solves for.
+pub(crate) fn complete_elliptic_integrals(modulus: f64) -> (f64, f64) {
     let mut a = 1.0_f64;
     let mut b = (1.0 - modulus * modulus).max(0.0).sqrt();
     let mut sum = 0.5 * modulus * modulus; // n = 0: 2^(-1) c_0^2, c_0 = k

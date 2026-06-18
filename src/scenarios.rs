@@ -157,6 +157,7 @@ mod tests {
     use crate::geometry::{Gap, GothicArchGroove, Paraboloid, Torus, Waviness};
     use crate::grid::Grid;
     use crate::material::Material;
+    use crate::pressure::FlankPressure;
     use crate::problem::{Control, Problem};
     use crate::reduced::GothicArchLaw;
     use crate::reference::DenseReference;
@@ -742,6 +743,102 @@ mod tests {
             split.total_load(),
             0.10,
             "two-flank superposition law vs solver",
+        );
+    }
+
+    #[test]
+    fn gothic_flank_pressure_matches_the_field_solver() {
+        // The reduced *pressure* law (crate::pressure) is the friction companion to
+        // the force law: it expands each flank's load Q into the full distribution
+        // p(x, y), so a multibody loop can bound the Coulomb traction by μ p and
+        // take the spin (drilling) moment μ ∫ p ρ dA. Here we confirm against the
+        // FFT + BCCG field solver that, on a well-separated flank (each an elliptic
+        // Hertz patch), the reduced distribution reproduces three moments of the
+        // solver's pressure: the load (0th), the peak (the p₀ ∝ Q^{1/3} size), and
+        // — the friction quantity the net force cannot give — the spin moment (1st
+        // moment of pressure about the patch centroid).
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 60.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 20_000,
+        };
+
+        // Calibrate the pressure law from the same flank radii the force law uses.
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank_pressure = FlankPressure::from_elliptic_flank(
+            radii.radius_x(),
+            radii.radius_y(),
+            material.e_star(),
+        );
+
+        // A conformal flank is strongly elliptic — exactly where a circular spin
+        // radius would be wrong, so the elliptic E(e) form earns its keep.
+        assert!(
+            flank_pressure.eccentricity() > 0.9,
+            "the conformal flank must be strongly elliptic: e={}",
+            flank_pressure.eccentricity(),
+        );
+
+        // Two well-separated flanks (2 meridional semi-axes apart), each carrying
+        // ~half the load as its own elliptic Hertz patch.
+        let half = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let y0 = 2.0 * half.semi_axis_y();
+        let centre_offset = y0 * (tube - ball) / ball;
+        let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+        let grid = gothic_grid(&half, y0);
+        let solution = sphere_in_gothic_arch(ball, groove, load, material, grid.clone(), config);
+        assert!(solution.diagnostics().converged, "solver did not converge");
+
+        // Integrate the solver's upper-flank pressure: its load, its load-weighted
+        // centroid (x = 0 by symmetry), and the first moment ∫ p ρ dA about it.
+        let pressure = solution.pressure();
+        let cell = grid.cell_area();
+        let mid = pressure.ncols() / 2;
+        let upper = || {
+            pressure
+                .indexed_iter()
+                .filter(move |&((_, j), &p)| j >= mid && p > 0.0)
+        };
+        let (load_flank, moment_y, weight) = upper()
+            .fold((0.0_f64, 0.0_f64, 0.0_f64), |(l, m, w), ((_, j), &p)| {
+                (l + p * cell, m + p * grid.y(j), w + p)
+            });
+        let centroid_y = moment_y / weight;
+        let spin_field = upper().fold(0.0_f64, |acc, ((i, j), &p)| {
+            let dx = grid.x(i); // patch centroid sits at x = 0
+            let dy = grid.y(j) - centroid_y;
+            acc + p * dx.hypot(dy) * cell
+        });
+
+        // Each flank carries about half the total load (weak residual coupling
+        // nudges it just under), and the reduced peak at that load matches the
+        // solver's flank peak.
+        assert_relative(load_flank, load / 2.0, 0.05, "flank load is ~P/2");
+        let (peak_field, _, _) = flank_peak(&solution, true);
+        assert_relative(
+            flank_pressure.peak_pressure(load_flank),
+            peak_field,
+            0.05,
+            "reduced peak vs solver flank peak",
+        );
+
+        // The headline: the closed-form spin moment (3/8) Q a E(e) at the solver's
+        // own flank load reproduces the field's first moment of pressure — the
+        // Coulomb drilling torque the resultant force F(δ) cannot supply.
+        assert_relative(
+            flank_pressure.spin_moment(load_flank, 1.0),
+            spin_field,
+            0.05,
+            "reduced spin moment vs field quadrature",
         );
     }
 

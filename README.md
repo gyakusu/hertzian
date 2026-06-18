@@ -130,6 +130,7 @@ flowchart TB
     subgraph py["Python 層"]
         API["hertzian パッケージ<br/>solve_sphere_on_flat / _on_torus / _in_gothic_arch / solve_height_field"]
         LAW["hertzian.GothicArchLaw<br/>縮約接触則 F(δ)"]
+        PRES["hertzian.FlankPressure<br/>面圧分布 p(x,y)・摩擦"]
     end
     subgraph bind["バインディング層"]
         PYO3["PyO3 + maturin + rust-numpy<br/>ゼロコピー NumPy・GIL 解放・単一 abi3 ホイール"]
@@ -142,6 +143,7 @@ flowchart TB
     end
     API --> PYO3
     LAW --> PYO3
+    PRES --> PYO3
     PYO3 --> SOLVER
     SOLVER --> INFL
     SOLVER --> GAP
@@ -513,6 +515,84 @@ law = law.with_flank_coupling(e_star=100e9, offset=1.6e-3)  # κ = 1/(2π E* y0)
 # あとはマルチボディの内側ループで F(δ) と接線剛性を評価する：
 f_t, f_n = law.force(2e-6, 6e-6)  # 接触力ベクトル (N)
 stiffness = law.jacobian(2e-6, 6e-6)  # 2x2 接線剛性 dF/dδ (N/m)
+```
+
+### 面圧分布 — クーロン摩擦のための軽量 `p(x, y)`
+
+縮約力則 $F(\boldsymbol{\delta})$ が与えるのは各フランクの**合力** $Q$ ——面圧の **0 次モーメント**
+$\int p\,\mathrm{d}A = Q$ ——で、無摩擦の法線接触にはこれで十分です。しかし**クーロン摩擦**は面圧の
+**分布そのもの**を要求します：接線トラクションは各点で $\lVert\mathbf{q}\rVert \le \mu\,p(x, y)$ に
+制限され、摩擦力——とりわけ**スピン（ドリル）摩擦モーメント** $M = \mu\int p\,\rho\,\mathrm{d}A$ ——は
+$\mu p$ の積分であって、合力からは復元できません。そこで力則の隣に、検証済みの楕円 Hertz フランクを
+**閉形式の面圧分布** $p(x, y)$ に蒸留した軽量な相棒 `FlankPressure` を置きます。
+
+#### モデル
+
+荷重 $Q$ を担う 1 フランクは、接触楕円（半軸 $a_x$ 周方向・$a_y$ 子午線方向、フランク中心まわり）上の
+半楕円体 Hertz 面圧です：
+
+$$p(x, y) = p_0\sqrt{1 - (x/a_x)^2 - (y/a_y)^2}, \qquad p_0 = \frac{3Q}{2\pi a_x a_y}.$$
+
+これが**荷重について閉形式**になるのは 2 つの事実によります：
+
+- **形は荷重に依らない。** 接触の離心率 $e$ は曲率比 $R_x/R_y$ だけで決まる（楕円 Hertz 基準が解く
+  超越関係と同じ）ので、荷重で変わるのは**大きさ**だけです。
+- **大きさは Hertz の立方根で効く。** $a_x, a_y \propto Q^{1/3}$、したがって $p_0 \propto Q^{1/3}$。
+  フランクの相対半径と弾性係数から半軸を**一度だけ**単位荷重で較正すれば（$K$ の較正とまったく同じ
+  手順）、任意荷重で $a(Q) = a_1\,Q^{1/3}$。
+
+つまり力則が返す $Q$ から `powf` 数回で分布全体が引け、FFT ソルブは要りません。
+
+#### 摩擦の要 — スピンモーメント
+
+分布が解き放つ（そして力則では出せない）摩擦量が**スピン（ドリル）モーメント**——接触パッチが法線
+まわりにピボットするときの限界摩擦トルク $M = \mu\int p\,\rho\,\mathrm{d}A$（$\rho$ は重心からの距離）
+です。半楕円体面圧ではこの積分が閉形式になり、
+
+$$M = \frac{3}{8}\,\mu\,Q\,a\,E(e)$$
+
+となります（$a$ は**長軸**半軸、$e$ は離心率、$E$ は第 2 種完全楕円積分；楕円の周長 $4a\,E(e)$ が
+$\int p\,\rho\,\mathrm{d}A$ の角度部分からそのまま出ます）。円形極限 $e\to 0$（$E(0)=\pi/2$）で教科書値
+$M = \tfrac{3\pi}{16}\mu Q a$ に戻ります。有効な摩擦てこ長は $M/(\mu Q) = \tfrac{3}{8}\,a\,E(e)$
+（`spin_radius`）です。保形軸受フランクは強く扁平（ここでは $e \approx 0.99$、$a/b \approx 9$）なので、
+等価円半径 $a_\text{eq}=\sqrt{a_x a_y}$ を使う素朴な見積もり $\tfrac{3\pi}{16}\mu Q a_\text{eq}$ は
+このモーメントを**約 49 % 過小評価**します——**形が効く**のです。
+
+フランクが除荷するとパッチは縮み（$a \propto Q^{1/3}\to 0$）、ピーク圧は下がり、スピンモーメントは消える
+（$M \propto Q^{4/3}\to 0$）ので、面圧像は力則の `C¹` な 2→1 受け渡しを継ぎ目なく追います。閉形式は
+2 つのパッチが分離している限り**フランクごとに厳密**で、半重なり域では弾性場を介して相互作用する（力則と
+同じ留保）ため、（カップリング込みの）$Q$ から組むパッチが一次の代用になります。
+
+#### 検証
+
+![縮約面圧分布の4パネル検証：(A) 2フランクの縮約面圧場（y=±y0 の2つの半楕円体）に、場ソルバの接触エッジと縮約接触楕円を重ね、footprint が一致する様子（軸は独立スケール）；(B) 子午線断面 p(0,y) で縮約の半楕円体がソルバ点に乗る様子；(C) 半軸 a_x・a_y とピーク圧が Q^{1/3} でスケールし、ソルバ点が縮約線に乗る対数–対数；(D) スピンモーメント (3/8)μQ a E(e) がソルバの1次モーメント ∫pρdA に乗り、円形代用 3π/16 μQ a_eq は離心率 e=0.99 ゆえ約49%下回る様子。](docs/img/pressure_law.png)
+
+縮約分布を FFT + BCCG 場ソルバと照合します。よく分離した 1 フランク（各々が楕円 Hertz パッチ）で、
+縮約 $p(x, y)$ はソルバ面圧の**3 つのモーメント**を再現します：荷重（0 次）、ピーク（$p_0\propto Q^{1/3}$
+の大きさ、残差 **0.2 %**）、そして——合力では出せない摩擦量である——**スピンモーメント**（1 次モーメント、
+残差 **0.1 %**）。一方で等価円半径を使う素朴な摩擦モデルは、保形パッチが強扁平（$e\approx 0.99$）なため
+**約 49 %** ずれます。
+
+これは新しいソルバ機能ではなく、$F(\delta)$ と同じ**検証済みプリミティブの蒸留**です：閉形式の
+$p(x, y)$ とスピンモーメントは FFT を呼ばずに評価でき、マルチボディのクーロン摩擦計算に直接置けます。
+Rust コア（`hertzian::FlankPressure`）と Python バインディング（`hertzian.FlankPressure`）の両方で公開し、
+面圧の積分＝荷重・$Q^{1/3}$ スケール・スピンモーメントの求積分／円形極限／ソルバ一致を Rust・Python テストに
+固定しています。図は `make gallery`（または
+`uv run --with matplotlib python scripts/render_pressure_law.py`）で再生成します。
+
+```python
+import hertzian
+
+# 力則と同じフランクから面圧分布を一度だけ較正する（実行時に FFT ソルブなし）。
+flank = hertzian.FlankPressure.from_elliptic_flank(
+    radius_x=3.31e-3, radius_y=0.104, e_star=100e9
+)
+
+# マルチボディの内側ループで、力則の各フランク荷重 Q± を分布へ展開する：
+q_plus, q_minus = law.flank_loads(2e-6, 6e-6)    # 上の力則 law から (N)
+a_x, a_y = flank.semi_axes(q_plus)               # 接触楕円の半軸 (m)
+p_local = flank.pressure_at(q_plus, 1e-5, 2e-5)  # 局所面圧 (Pa) — クーロン限界は μ·p
+m_spin = flank.spin_moment(q_plus, 0.1)          # スピン（ドリル）モーメント (N·m, μ=0.1)
 ```
 
 ---

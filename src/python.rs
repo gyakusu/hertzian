@@ -26,6 +26,7 @@ use pyo3::prelude::*;
 use crate::geometry::{GothicArchGroove, Torus};
 use crate::grid::Grid;
 use crate::material::Material;
+use crate::pressure::FlankPressure as CoreFlankPressure;
 use crate::reduced::{contact_half_angle as core_contact_half_angle, GothicArchLaw as CoreLaw};
 use crate::scenarios::{
     solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat, sphere_on_sphere, sphere_on_torus,
@@ -42,6 +43,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Solution>()?;
     module.add_class::<Diagnostics>()?;
     module.add_class::<GothicArchLaw>()?;
+    module.add_class::<FlankPressure>()?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_flat, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_sphere, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_torus, module)?)?;
@@ -311,6 +313,100 @@ impl GothicArchLaw {
             self.inner.stiffness(),
             self.inner.contact_angle(),
             self.inner.coupling(),
+        )
+    }
+}
+
+/// A reduced, closed-form contact-pressure distribution for one Gothic-arch flank.
+///
+/// The Coulomb-friction companion to [`GothicArchLaw`]: that force law gives the
+/// per-flank *resultant* `Q`, this expands it into the full elliptic-Hertz field
+/// `p(x, y)` the friction model integrates. The local traction bound is
+/// `friction * pressure_at(..)`, and the spin (drilling) moment — the friction
+/// quantity the net force cannot supply — has the closed form `(3/8) μ Q a E(e)`
+/// ([`FlankPressure.spin_moment`]). Both semi-axes and the peak pressure scale as
+/// the Hertzian cube root `Q^{1/3}`, so a multibody loop evaluates the whole
+/// distribution from the force law's `Q` in a few `powf`s, with no FFT solve.
+#[pyclass(name = "FlankPressure", module = "hertzian._core", frozen)]
+struct FlankPressure {
+    inner: CoreFlankPressure,
+}
+
+#[pymethods]
+impl FlankPressure {
+    /// Build from a known contact ellipse `(semi_axis_x, semi_axis_y)` at a load.
+    ///
+    /// The semi-axes are the patch dimensions at `reference_load`; the unit-load
+    /// shape is read off by dividing out `reference_load^{1/3}`. Prefer
+    /// [`FlankPressure.from_elliptic_flank`], which derives the ellipse from the
+    /// flank geometry and material.
+    #[new]
+    #[pyo3(signature = (*, semi_axis_x, semi_axis_y, reference_load))]
+    fn new(semi_axis_x: f64, semi_axis_y: f64, reference_load: f64) -> PyResult<Self> {
+        require_positive(semi_axis_x, "semi_axis_x")?;
+        require_positive(semi_axis_y, "semi_axis_y")?;
+        require_positive(reference_load, "reference_load")?;
+        Ok(Self {
+            inner: CoreFlankPressure::new(semi_axis_x, semi_axis_y, reference_load),
+        })
+    }
+
+    /// Calibrate the distribution from one flank's elliptic-Hertz contact.
+    ///
+    /// `radius_x`, `radius_y` are the flank's principal relative radii and
+    /// `e_star` the equivalent modulus — the same flank
+    /// [`GothicArchLaw.from_elliptic_flank`] calibrates `K` from.
+    #[staticmethod]
+    #[pyo3(signature = (*, radius_x, radius_y, e_star))]
+    fn from_elliptic_flank(radius_x: f64, radius_y: f64, e_star: f64) -> PyResult<Self> {
+        require_positive(radius_x, "radius_x")?;
+        require_positive(radius_y, "radius_y")?;
+        require_positive(e_star, "e_star")?;
+        Ok(Self {
+            inner: CoreFlankPressure::from_elliptic_flank(radius_x, radius_y, e_star),
+        })
+    }
+
+    /// The contact-ellipse eccentricity `e = sqrt(1 - (b/a)^2)` (load-independent).
+    #[getter]
+    const fn eccentricity(&self) -> f64 {
+        self.inner.eccentricity()
+    }
+
+    /// The contact semi-axes `(a_x, a_y)` at load `Q`, scaling as `Q^{1/3}`.
+    fn semi_axes(&self, load: f64) -> (f64, f64) {
+        self.inner.semi_axes(load)
+    }
+
+    /// The peak (central) pressure `p0 = 3Q / (2 pi a_x a_y)` at load `Q`.
+    fn peak_pressure(&self, load: f64) -> f64 {
+        self.inner.peak_pressure(load)
+    }
+
+    /// The local pressure `p(x, y)` at load `Q`, centred on the patch (Pa).
+    ///
+    /// The semi-ellipsoidal Hertz field inside the contact ellipse and `0`
+    /// outside; the limiting Coulomb traction here is `friction * p`.
+    fn pressure_at(&self, load: f64, x: f64, y: f64) -> f64 {
+        self.inner.pressure_at(load, x, y)
+    }
+
+    /// The effective spin (drilling) friction radius `(3/8) a E(e)` at load `Q`.
+    fn spin_radius(&self, load: f64) -> f64 {
+        self.inner.spin_radius(load)
+    }
+
+    /// The Coulomb spin moment `M = friction * integral(p rho dA) = (3/8) μ Q a E(e)`.
+    fn spin_moment(&self, load: f64, friction: f64) -> PyResult<f64> {
+        require_non_negative(friction, "friction")?;
+        Ok(self.inner.spin_moment(load, friction))
+    }
+
+    fn __repr__(&self) -> String {
+        let (a_x, a_y) = self.inner.semi_axes(1.0);
+        format!(
+            "FlankPressure(semi_axes@1N=({a_x:.6e}, {a_y:.6e}), eccentricity={:.6e})",
+            self.inner.eccentricity(),
         )
     }
 }
