@@ -843,6 +843,118 @@ mod tests {
     }
 
     #[test]
+    fn gothic_overlap_flank_pressure_matches_the_field_solver() {
+        // The overlap counterpart of the separated cross-check. When the shim is
+        // tightened to a half overlap the two flank contacts merge into a single
+        // *connected* patch with a saddle between the peaks. The reduced pressure
+        // assembles this as the pointwise *maximum* of the two coupled-load
+        // semi-ellipsoids (the dual of the gap being the pointwise minimum of the
+        // two wells). Against the field solver this must (1) reproduce the peak from
+        // the per-flank load, (2) give a connected saddle — load-bearing centre,
+        // below the peaks — and (3) track the meridional profile far better with the
+        // maximum than the naive sum, which double-counts the overlap into a
+        // spurious central hump.
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 60.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 20_000,
+        };
+
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank_pressure = FlankPressure::from_elliptic_flank(
+            radii.radius_x(),
+            radii.radius_y(),
+            material.e_star(),
+        );
+        let half = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+
+        // Half overlap: flank centres one meridional semi-axis apart (y0 = b/2).
+        let b = half.semi_axis_y();
+        let y0 = 0.5 * b;
+        let centre_offset = y0 * (tube - ball) / ball;
+        let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+        let grid = gothic_grid(&half, y0);
+        let solution = sphere_in_gothic_arch(ball, groove, load, material, grid.clone(), config);
+        assert!(solution.diagnostics().converged, "solver did not converge");
+
+        // Per-flank loads from the solver (each half-plane of the groove centre).
+        let pressure = solution.pressure();
+        let cell = grid.cell_area();
+        let nx = pressure.nrows();
+        let mid = pressure.ncols() / 2;
+        let load_plus: f64 = pressure
+            .indexed_iter()
+            .filter(|&((_, j), _)| j >= mid)
+            .map(|(_, &p)| p * cell)
+            .sum();
+        let load_minus: f64 = pressure
+            .indexed_iter()
+            .filter(|&((_, j), _)| j < mid)
+            .map(|(_, &p)| p * cell)
+            .sum();
+
+        // The solver's meridional cut at x = 0 and the reduced max / sum on it.
+        let cut = pressure.row(nx / 2);
+        let peak_solver = cut.iter().fold(0.0_f64, |m, &p| m.max(p));
+        let mut sq_max = 0.0;
+        let mut sq_sum = 0.0;
+        let mut count = 0.0;
+        for (j, &p_solver) in cut.iter().enumerate() {
+            let y = grid.y(j);
+            if y.abs() > y0 + half.semi_axis_y() {
+                continue; // restrict the RMS to the contact span
+            }
+            let max = flank_pressure.two_flank_pressure_at(load_plus, load_minus, y0, 0.0, y);
+            let sum = flank_pressure.pressure_at(load_plus, 0.0, y - y0)
+                + flank_pressure.pressure_at(load_minus, 0.0, y + y0);
+            sq_max += (max - p_solver).powi(2);
+            sq_sum += (sum - p_solver).powi(2);
+            count += 1.0;
+        }
+        let rms_max = (sq_max / count).sqrt() / peak_solver;
+        let rms_sum = (sq_sum / count).sqrt() / peak_solver;
+
+        // (1) The per-flank load reproduces the peak (the overlap reinforces it a
+        // few percent, so the reduced value sits a touch low).
+        assert_relative(
+            flank_pressure.peak_pressure(load_plus),
+            peak_solver,
+            0.08,
+            "reduced peak vs solver flank peak",
+        );
+
+        // (2) The reduced maximum is a connected saddle: the centre carries load but
+        // stays below the peaks, matching the solver's connected contact.
+        let centre = flank_pressure.two_flank_pressure_at(load_plus, load_minus, y0, 0.0, 0.0);
+        let peak_reduced = flank_pressure.two_flank_pressure_at(load_plus, load_minus, y0, 0.0, y0);
+        assert!(
+            centre > 0.5 * peak_reduced && centre < peak_reduced,
+            "the overlap centre must be a load-bearing saddle: centre={centre:e} peak={peak_reduced:e}",
+        );
+
+        // (3) The maximum tracks the connected profile; the sum is far worse (its
+        // double-counted overlap is the wrong topology).
+        assert!(
+            rms_max < 0.15,
+            "the pointwise max must track the connected profile: RMS/peak={rms_max:e}",
+        );
+        assert!(
+            rms_sum > 2.0 * rms_max,
+            "the sum must be clearly worse than the max in the overlap: \
+             sum RMS={rms_sum:e} vs max RMS={rms_max:e}",
+        );
+    }
+
+    #[test]
     fn gothic_overlap_shifts_the_load_centroid_outboard() {
         // The second-order directional signature: the flank *normal* rotates as the
         // contacts overlap. Each flank lifts the inboard side of its neighbour more

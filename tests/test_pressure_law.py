@@ -95,6 +95,38 @@ def test_spin_moment_matches_a_direct_quadrature() -> None:
     assert math.isclose(flank.spin_moment(load, friction), numeric, rel_tol=QUADRATURE_RTOL)
 
 
+def test_two_flanks_equal_the_sum_when_separated() -> None:
+    """Where the patches do not overlap, the pointwise max equals the sum."""
+    flank = _flank()
+    load = 60.0
+    _, a_y = flank.semi_axes(load)
+    offset = 2.0 * a_y  # comfortably separated
+    for j in range(-8, 9):
+        y = j * 0.5 * a_y
+        combined = flank.two_flank_pressure_at(load, load, offset, 0.0, y)
+        summed = flank.pressure_at(load, 0.0, y - offset) + flank.pressure_at(load, 0.0, y + offset)
+        assert math.isclose(combined, summed, rel_tol=EXACT_RTOL, abs_tol=0.0)
+
+
+def test_two_flanks_form_a_saddle_in_the_overlap() -> None:
+    """Half overlap: the connected field has a load-bearing saddle below the peaks.
+
+    The sum would instead pile a spurious central hump above the peaks — the wrong
+    topology — which is exactly why the assembly rule is the maximum, not the sum.
+    """
+    flank = _flank()
+    load = 60.0
+    _, b = flank.semi_axes(load)
+    offset = 0.5 * b  # half overlap
+
+    peak = flank.two_flank_pressure_at(load, load, offset, 0.0, offset)
+    centre = flank.two_flank_pressure_at(load, load, offset, 0.0, 0.0)
+    sum_centre = flank.pressure_at(load, 0.0, -offset) + flank.pressure_at(load, 0.0, offset)
+
+    assert 0.0 < centre < peak  # a saddle: load-bearing but below the peaks
+    assert sum_centre > peak  # the sum's spurious central hump
+
+
 def test_spin_moment_reduces_to_the_circular_result() -> None:
     """A circular contact gives the textbook ``3π/16 μ Q a`` (E(0) = π/2)."""
     flank = hertzian.FlankPressure.from_elliptic_flank(

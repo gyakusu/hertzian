@@ -54,18 +54,36 @@
 //! (`a/b > 5`), where the circular-radius stand-in understates this moment by tens
 //! of percent — the distribution genuinely matters.
 //!
-//! # Two flanks, and the C¹ handover
+//! # Two flanks: superposition, the overlap, and the C¹ handover
 //!
-//! Pair this per-flank distribution with the force law's per-flank loads: a
-//! separated Gothic contact is two of these semi-ellipsoids, centred at `y = ±y0`
-//! and scaled to the loads `Q_±` from
-//! [`GothicArchLaw::flank_loads`](crate::reduced::GothicArchLaw::flank_loads). As a
-//! flank unloads its patch shrinks (`a ∝ Q^{1/3} → 0`), its peak falls, and its
-//! spin moment vanishes (`M ∝ Q^{4/3} → 0`), so the pressure picture follows the
-//! force law's `C¹` two-to-one handover without a seam. The closed form is exact
-//! per flank where the two patches are separate; in the half-overlap regime the
-//! flanks interact through the elastic field, the same caveat the force law
-//! carries, and the patch built from the (coupled) `Q` is the first-order stand-in.
+//! Pair this per-flank distribution with the force law's per-flank loads: a Gothic
+//! contact is two of these semi-ellipsoids, centred at `y = ±y0` and scaled to the
+//! loads `Q_±` from
+//! [`GothicArchLaw::flank_loads`](crate::reduced::GothicArchLaw::flank_loads). When
+//! the two patches are **separated** they simply sit side by side, and either the
+//! sum or the maximum reproduces the field exactly (they do not overlap).
+//!
+//! When the shim is tightened to the **half-overlap** regime the two contacts
+//! merge into a single *connected* patch with a saddle between the peaks — and here
+//! the rule matters. Summing the two semi-ellipsoids is qualitatively wrong: it
+//! double-counts the overlap band and predicts a central *hump* taller than the
+//! flank peaks, whereas the real connected contact has a saddle *below* them
+//! (the elastic interaction sheds, not piles, pressure where the flanks meet). The
+//! lightweight rule that gets the topology right is the pointwise **maximum**,
+//! [`FlankPressure::two_flank_pressure_at`]: each point takes the nearer (more
+//! loaded) flank. This is the exact dual of the Gothic *gap*, which is the
+//! pointwise **minimum** of the two paraboloidal wells (the nearer *surface* wins);
+//! the pressure mirrors it (the nearer *flank* wins). The maximum gives a connected
+//! saddle that tracks the field solver to a ~10 % profile RMS through the half
+//! overlap — against ~35 % for the sum — with the residual (the overlap reinforces
+//! the peak a few percent and depresses the saddle ~20 % below the geometric
+//! crossover) the same elastic-interaction caveat the force law defers to its next
+//! stage. The per-flank patch size and peak still come from the (coupled) load `Q`,
+//! so they remain first-order correct across the overlap.
+//!
+//! As a flank unloads its patch shrinks (`a ∝ Q^{1/3} → 0`), its peak falls, and
+//! its spin moment vanishes (`M ∝ Q^{4/3} → 0`), so the pressure picture follows
+//! the force law's `C¹` two-to-one handover without a seam.
 
 use core::f64::consts::PI;
 
@@ -203,6 +221,32 @@ impl FlankPressure {
         } else {
             self.peak_pressure(load) * (1.0 - radial).sqrt()
         }
+    }
+
+    /// The connected two-flank pressure at `(x, y)`: the pointwise maximum of the
+    /// two flank semi-ellipsoids (loads `Q_±`, centred at `y = ±offset`).
+    ///
+    /// Both flanks share this distribution's shape (the symmetric Gothic groove),
+    /// scaled to their own loads. The **maximum** — not the sum — is what assembles
+    /// the connected contact: where the patches overlap it takes the nearer (more
+    /// loaded) flank, giving the saddle the real contact has, whereas the sum would
+    /// double-count the overlap into a spurious central hump. This is the dual of
+    /// the Gothic gap being the pointwise *minimum* of the two wells (the nearer
+    /// surface wins; here the nearer flank wins). Exact where the patches are
+    /// separated (they do not overlap, so max = sum), and the first-order connected
+    /// field through the half overlap (see the [module docs](self#two-flanks-superposition-the-overlap-and-the-c-handover)).
+    #[must_use]
+    pub fn two_flank_pressure_at(
+        &self,
+        load_plus: f64,
+        load_minus: f64,
+        offset: f64,
+        x: f64,
+        y: f64,
+    ) -> f64 {
+        let upper = self.pressure_at(load_plus, x, y - offset);
+        let lower = self.pressure_at(load_minus, x, y + offset);
+        upper.max(lower)
     }
 
     /// The effective spin (drilling) friction radius `(3/8) a E(e)` at load `Q`.
@@ -345,6 +389,53 @@ mod tests {
         }
         let cell = (1.0 / n_r as f64) * (2.0 * PI / n_theta as f64);
         friction * integral * cell
+    }
+
+    #[test]
+    fn two_flanks_equal_the_sum_when_separated() {
+        // Where the two patches do not overlap, the pointwise maximum and the sum
+        // agree: each point is inside at most one flank, so max = sum exactly.
+        let flank = sample_flank();
+        let load = 60.0;
+        let (_, a_y) = flank.semi_axes(load);
+        let offset = 2.0 * a_y; // patches 4 a_y apart: comfortably separated
+        for j in -8..=8 {
+            let y = f64::from(j) * 0.5 * a_y;
+            let combined = flank.two_flank_pressure_at(load, load, offset, 0.0, y);
+            let sum =
+                flank.pressure_at(load, 0.0, y - offset) + flank.pressure_at(load, 0.0, y + offset);
+            assert_close(combined, sum, 1.0e-12, "max equals sum when separated");
+        }
+    }
+
+    #[test]
+    fn two_flanks_form_a_saddle_in_the_overlap() {
+        // Half overlap (centres one meridional semi-axis apart, offset = b/2): the
+        // connected field has its peaks at the flank centres and a saddle between
+        // them that carries load but stays below the peaks. The sum would instead
+        // pile a spurious central hump above the peaks — the wrong topology.
+        let flank = sample_flank();
+        let load = 60.0;
+        let (_, b) = flank.semi_axes(load);
+        let offset = 0.5 * b; // half overlap
+
+        let peak = flank.two_flank_pressure_at(load, load, offset, 0.0, offset);
+        let centre = flank.two_flank_pressure_at(load, load, offset, 0.0, 0.0);
+        let sum_centre =
+            flank.pressure_at(load, 0.0, -offset) + flank.pressure_at(load, 0.0, offset);
+
+        assert!(
+            centre > 0.0,
+            "the overlapped centre carries load (connected)"
+        );
+        assert!(
+            centre < peak,
+            "but stays below the flank peak — a saddle: centre={centre:e} peak={peak:e}",
+        );
+        assert!(
+            sum_centre > peak,
+            "the sum instead piles a spurious hump above the peak: {sum_centre:e} > {peak:e}",
+        );
     }
 
     #[test]

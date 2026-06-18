@@ -69,9 +69,11 @@ CENTRE_RADIUS = 15.0e-3
 E_STAR = 100.0e9
 
 # Load for the two-flank field panels, and the flank separation (in meridional
-# semi-axes b) that leaves the flanks cleanly separated — each its own ellipse.
+# semi-axes b): one cleanly separated (each its own ellipse), one at the half
+# overlap (centres b apart, one connected patch with a saddle between the peaks).
 FIELD_LOAD = 120.0
 SEPARATION_IN_B = 2.0
+OVERLAP_IN_B = 0.5
 
 # A representative friction coefficient for the spin-moment panel.
 FRICTION = 0.12
@@ -268,7 +270,9 @@ def reduced_two_flank_field(flank: hertzian.FlankPressure, case: FieldCase) -> N
     """Build the reduced two-flank pressure field on the case's ``(x, y)`` grid (Pa).
 
     Two elliptic-Hertz semi-ellipsoids centred at ``y = ±y0`` and scaled to the
-    per-flank loads — the lightweight stand-in for the solver's field.
+    per-flank loads, assembled by the pointwise *maximum* (not the sum): the rule
+    that gives the connected overlap its saddle, identical to the sum where the
+    patches are separated. The dual of the Gothic gap being the pointwise minimum.
     """
     field = np.zeros((case.x.size, case.y.size))
     for load, centre in ((case.load_plus, case.y0), (case.load_minus, -case.y0)):
@@ -277,7 +281,7 @@ def reduced_two_flank_field(flank: hertzian.FlankPressure, case: FieldCase) -> N
         a_x, a_y = flank.semi_axes(load)
         p0 = flank.peak_pressure(load)
         radial = (case.x[:, None] / a_x) ** 2 + ((case.y[None, :] - centre) / a_y) ** 2
-        field += p0 * np.sqrt(np.clip(1.0 - radial, 0.0, None))
+        field = np.maximum(field, p0 * np.sqrt(np.clip(1.0 - radial, 0.0, None)))
     return field
 
 
@@ -443,6 +447,81 @@ def _panel_spin(ax: Axes, arch: list[ArchPoint], flank: hertzian.FlankPressure) 
     ax.legend(frameon=False, fontsize=8, loc="upper left")
 
 
+def _panel_overlap_field(ax: Axes, case: FieldCase, flank: hertzian.FlankPressure) -> None:
+    """Draw the connected half-overlap field (reduced pointwise max) + solver edge."""
+    reduced = reduced_two_flank_field(flank, case)
+    mesh = ax.pcolormesh(case.y * MM, case.x * MM, reduced * GPA, cmap="magma", shading="auto")
+    plt.colorbar(mesh, ax=ax, fraction=0.046, pad=0.03, label="reduced $p$ (GPa)")
+    floor = CONTACT_FLOOR * case.pressure.max()
+    ax.contour(
+        case.y * MM,
+        case.x * MM,
+        case.pressure,
+        levels=[floor],
+        colors=SOLVER_COLOUR,
+        linewidths=1.6,
+    )
+    for centre in (case.y0, -case.y0):
+        ax.plot(centre * MM, 0.0, "o", ms=4.0, mfc="white", mec="black", zorder=4)
+    ax.plot([], [], color=SOLVER_COLOUR, lw=1.6, label="solver contact edge")
+    ax.set_xlabel("y (mm) — meridional  ·  axes scaled independently")
+    ax.set_ylabel("x (mm) — circumferential")
+    ax.set_title(
+        "(A) Half overlap — one connected patch (reduced = pointwise max)",
+        fontweight="bold",
+        fontsize=10,
+    )
+    ax.legend(frameon=True, fontsize=8, loc="upper right", framealpha=0.9)
+
+
+def _panel_overlap_cut(ax: Axes, case: FieldCase, flank: hertzian.FlankPressure) -> None:
+    """Draw the overlap meridional cut: solver vs reduced max vs the wrong sum."""
+    y_line = np.linspace(case.y.min(), case.y.max(), 600)
+    red_max = np.array(
+        [
+            flank.two_flank_pressure_at(case.load_plus, case.load_minus, case.y0, 0.0, t)
+            for t in y_line
+        ]
+    )
+    red_sum = np.array(
+        [
+            flank.pressure_at(case.load_plus, 0.0, t - case.y0)
+            + flank.pressure_at(case.load_minus, 0.0, t + case.y0)
+            for t in y_line
+        ]
+    )
+    ax.plot(
+        y_line * MM,
+        red_sum * GPA,
+        color=CIRCULAR_COLOUR,
+        lw=1.6,
+        ls=":",
+        label="naive sum (spurious hump)",
+    )
+    ax.plot(
+        y_line * MM,
+        red_max * GPA,
+        color=LAW_COLOUR,
+        lw=2.2,
+        label="reduced max (connected saddle)",
+    )
+    ax.scatter(
+        case.y * MM, case.cut * GPA, s=12, c=SOLVER_COLOUR, alpha=0.8, zorder=3, label="solver"
+    )
+    for centre in (case.y0, -case.y0):
+        ax.axvline(centre * MM, color="0.7", lw=0.8, ls=":")
+    ax.set_xlabel("y (mm) — meridional")
+    ax.set_ylabel("pressure (GPa)")
+    ax.set_title(
+        "(B) The overlap rule — max gives the saddle, sum overshoots",
+        fontweight="bold",
+        fontsize=10,
+    )
+    ax.set_ylim(bottom=0.0)
+    ax.grid(visible=True, alpha=0.3)
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+
+
 # --------------------------------------------------------------------------- #
 # Figure.
 # --------------------------------------------------------------------------- #
@@ -500,6 +579,50 @@ def main() -> None:
     plt.close(fig)
     size_kb = path.stat().st_size / 1024.0
     print(f"  wrote {path.relative_to(OUT_DIR.parent.parent)}  ({size_kb:.0f} KiB)")
+
+    # The overlap: the same flank pressure, but the shim tightened so the two
+    # patches merge into one connected contact (the pressure dual of gothic_overlap).
+    overlap = separated_field(FIELD_LOAD, OVERLAP_IN_B)
+    y = overlap.y
+    span = np.abs(y) <= overlap.y0 + flank.semi_axes(overlap.load_plus)[1]
+    peak_field = float(overlap.cut.max())
+    centre_field = float(overlap.cut[np.argmin(np.abs(y))])
+
+    def _max_cut(t: float) -> float:
+        return flank.two_flank_pressure_at(
+            overlap.load_plus, overlap.load_minus, overlap.y0, 0.0, t
+        )
+
+    rms_max = math.sqrt(
+        float(
+            np.mean(
+                [(_max_cut(t) - p) ** 2 for t, p in zip(y[span], overlap.cut[span], strict=True)]
+            )
+        )
+    )
+    print(
+        f"  half-overlap: y0={overlap.y0 * MM:.3f} mm  "
+        f"saddle/peak solver={centre_field / peak_field:.2f}  "
+        f"reduced-max profile RMS/peak={rms_max / peak_field:.2f}"
+    )
+
+    fig2, axes2 = plt.subplots(1, 2, figsize=(13.0, 5.2))
+    _panel_overlap_field(axes2[0], overlap, flank)
+    _panel_overlap_cut(axes2[1], overlap, flank)
+    fig2.suptitle(
+        "hertzian — the overlap: two flank pressures merge into one connected patch "
+        "(pointwise max, the dual of the gap's min)",
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig2.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+    path2 = OUT_DIR / "pressure_overlap.png"
+    fig2.savefig(path2, dpi=130, bbox_inches="tight", facecolor="white")
+    plt.close(fig2)
+    print(
+        f"  wrote {path2.relative_to(OUT_DIR.parent.parent)}  "
+        f"({path2.stat().st_size / 1024.0:.0f} KiB)"
+    )
     print("done.")
 
 

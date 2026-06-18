@@ -391,6 +391,26 @@ impl FlankPressure {
         self.inner.pressure_at(load, x, y)
     }
 
+    /// The connected two-flank pressure at `(x, y)`: the pointwise maximum of the
+    /// two flank semi-ellipsoids (loads `Q_±`, centred at `y = ±offset`).
+    ///
+    /// The maximum — not the sum — assembles the connected contact: it gives the
+    /// saddle the real overlap has, where the sum would double-count into a spurious
+    /// central hump. The dual of the Gothic gap being the pointwise minimum of the
+    /// two wells. Exact when the patches are separated, the first-order connected
+    /// field through the half overlap.
+    fn two_flank_pressure_at(
+        &self,
+        load_plus: f64,
+        load_minus: f64,
+        offset: f64,
+        x: f64,
+        y: f64,
+    ) -> f64 {
+        self.inner
+            .two_flank_pressure_at(load_plus, load_minus, offset, x, y)
+    }
+
     /// The effective spin (drilling) friction radius `(3/8) a E(e)` at load `Q`.
     fn spin_radius(&self, load: f64) -> f64 {
         self.inner.spin_radius(load)
