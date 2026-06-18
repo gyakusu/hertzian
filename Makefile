@@ -47,6 +47,7 @@ build: ## Build the native extension into the uv venv (maturin develop)
 gallery: build ## Render the README validation gallery into docs/img (uses matplotlib)
 	uv run --with matplotlib python scripts/render_gallery.py
 	uv run --with matplotlib python scripts/fit_reduced_law.py
+	uv run --with matplotlib python scripts/render_coupling_cross_section.py
 
 test: test-rust test-py ## Run the full test suite (Rust + Python)
 
