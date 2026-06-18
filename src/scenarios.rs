@@ -746,6 +746,92 @@ mod tests {
     }
 
     #[test]
+    fn gothic_overlap_shifts_the_load_centroid_outboard() {
+        // The second-order directional signature: the flank *normal* rotates as the
+        // contacts overlap. Each flank lifts the inboard side of its neighbour more
+        // than the outboard side (the lift `Q/(π E* d)` is steeper the closer the
+        // patch), so the load centroid slides *outboard* of the geometric offset
+        // y0 — its load sits at a larger effective offset, i.e. a steeper effective
+        // contact angle α_eff = arcsin(y_centroid / R_s) > the geometric α. This
+        // pins the field-solver evidence for promoting α to an effective α(y0/b):
+        // the centroid is outboard in the half overlap and returns to y0 (the
+        // geometric angle) once the flanks separate.
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 120.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 40_000,
+        };
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let b = flank.semi_axis_y();
+        let ax = flank.semi_axis_x();
+
+        let centroid_over_y0 = |ratio: f64| {
+            let y0 = ratio * b;
+            let centre_offset = y0 * (tube - ball) / ball;
+            let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+            let dx = ax / 8.0;
+            let dy = b / 16.0;
+            let nx = even_ceil(2.0 * 2.5 * ax / dx);
+            let ny = even_ceil(2.0 * (y0 + 2.5 * b) / dy);
+            let grid = Grid::new(nx, ny, dx, dy);
+            let sol = sphere_in_gothic_arch(ball, groove, load, material, grid.clone(), config);
+            assert!(sol.diagnostics().converged, "solver did not converge");
+            // Load-weighted centroid of the upper (y > 0) flank.
+            let (moment, weight) =
+                sol.pressure()
+                    .indexed_iter()
+                    .fold((0.0_f64, 0.0_f64), |(m, w), ((_, j), &p)| {
+                        let y = grid.y(j);
+                        if y > 0.0 {
+                            (m + p * y, w + p)
+                        } else {
+                            (m, w)
+                        }
+                    });
+            moment / (weight * y0)
+        };
+
+        let half = centroid_over_y0(0.5); // half overlap
+        let onset = centroid_over_y0(1.0); // patches just meet
+        let separated = centroid_over_y0(2.0); // well separated
+
+        // At half overlap the centroid is well outboard — the geometric α clearly
+        // understates the effective flank angle ...
+        assert!(
+            half > 1.2,
+            "half-overlap centroid must sit outboard of y0: {half}",
+        );
+        // ... the shift collapses monotonically as the flanks pull apart ...
+        assert!(
+            half > onset && onset > separated,
+            "the outboard shift must fade with separation: {half} > {onset} > {separated}",
+        );
+        // ... it grows steeply into the overlap (the half-overlap shift dwarfs the
+        // onset one) ...
+        assert!(
+            half - 1.0 > 5.0 * (onset - 1.0),
+            "the shift must grow steeply into overlap: {} vs {}",
+            half - 1.0,
+            onset - 1.0,
+        );
+        // ... and the separated limit recovers the geometric offset (α_eff → α).
+        assert!(
+            separated < 1.01,
+            "separated flanks sit at the geometric offset: {separated}",
+        );
+    }
+
+    #[test]
     fn gothic_coupling_tracks_the_effective_flank_count() {
         // The neighbour-lift coupling (crate::reduced) earns its keep here. As the
         // groove shim is tightened from well-separated flanks down to a half overlap
