@@ -232,10 +232,31 @@ impl GothicArchLaw {
         })
     }
 
+    /// Enable the neighbour-lift coupling from the modulus `e_star` and offset `y0`.
+    ///
+    /// Returns a copy with the cross-compliance `κ = 1 / (2 π E* y0)` set — the
+    /// Boussinesq far-field lift `u ≈ Q/(π E* · 2 y0)` one flank raises under the
+    /// other. Composes with the calibrating constructor:
+    /// `GothicArchLaw.from_elliptic_flank(...).with_flank_coupling(e_star=.., offset=..)`.
+    #[pyo3(signature = (*, e_star, offset))]
+    fn with_flank_coupling(&self, e_star: f64, offset: f64) -> PyResult<Self> {
+        require_positive(e_star, "e_star")?;
+        require_positive(offset, "offset")?;
+        Ok(Self {
+            inner: self.inner.with_flank_coupling(e_star, offset),
+        })
+    }
+
     /// The per-flank Hertz stiffness `K` (N·m^−3/2).
     #[getter]
     const fn stiffness(&self) -> f64 {
         self.inner.stiffness()
+    }
+
+    /// The neighbour-lift cross-compliance `κ` (m·N⁻¹); `0` when uncoupled.
+    #[getter]
+    const fn coupling(&self) -> f64 {
+        self.inner.coupling()
     }
 
     /// The contact half-angle `α` (radians).
@@ -252,6 +273,15 @@ impl GothicArchLaw {
     /// The two flank approaches `(s_+, s_-)` for a displacement `(delta_t, delta_n)`.
     fn flank_approaches(&self, delta_t: f64, delta_n: f64) -> (f64, f64) {
         self.inner.flank_approaches(delta_t, delta_n)
+    }
+
+    /// The two flank loads `(Q_+, Q_-)` for prescribed flank approaches `(s_+, s_-)`.
+    ///
+    /// The self-consistent solution of `Q_± = K⌊s_± − κ Q_∓⌋₊^{3/2}` — two
+    /// independent Hertz loads when uncoupled, the coupled pair when
+    /// [`with_flank_coupling`](Self::with_flank_coupling) is on.
+    fn coupled_loads(&self, s_plus: f64, s_minus: f64) -> (f64, f64) {
+        self.inner.coupled_loads(s_plus, s_minus)
     }
 
     /// The two flank loads `(Q_+, Q_-)` for a displacement `(delta_t, delta_n)`.
@@ -277,9 +307,10 @@ impl GothicArchLaw {
 
     fn __repr__(&self) -> String {
         format!(
-            "GothicArchLaw(stiffness={:.6e}, contact_angle={:.6e})",
+            "GothicArchLaw(stiffness={:.6e}, contact_angle={:.6e}, coupling={:.6e})",
             self.inner.stiffness(),
             self.inner.contact_angle(),
+            self.inner.coupling(),
         )
     }
 }

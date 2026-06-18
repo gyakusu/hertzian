@@ -20,9 +20,11 @@ It runs the solver ~100 times to produce four checks, drawn into one figure:
   ``Q_-/Q_-(0) = (1 - xi)^{3/2}``, meeting zero with zero slope; solver markers
   (an asymmetric-well experiment) land on it. The ``3/2`` exponent *is* the C¹.
 * **(D) Coupling.** Sweeping the shim from merged to separated, the effective flank
-  count ``eta = P / (K delta^{3/2})`` runs from 1 (single arc) to 2 (two flanks),
-  the geometry-driven two-to-one transition; the gap from 2 measures the elastic
-  coupling the single-``K`` model folds into its residual.
+  count ``eta = P / (K delta^{3/2})`` runs from ~1 (single arc) toward 2 (two
+  flanks). The uncoupled superposition is frozen at 2; the neighbour-lift law (each
+  flank lifts the half-space under the other by ``u ~ Q/(pi E* . 2 y0)``) tracks the
+  solver down into the half-overlap regime, closing almost all of the shortfall
+  below 2 that the single-``K`` model would otherwise fold into its residual.
 
 Run it (matplotlib is a render-only dependency, kept out of the locked env):
 
@@ -260,20 +262,33 @@ def asymmetric_unloading(load: float, samples: int) -> tuple[NDArray[np.float64]
 
 def coupling_curve(
     load: float, separations_in_b: NDArray[np.float64], stiffness: float
-) -> NDArray[np.float64]:
-    """Return the effective flank count ``eta = P / (K delta^{3/2})`` per separation.
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the solver and coupled-law effective flank counts per separation.
 
     Sweeping the flank separation from a fraction of ``b`` (overlapping, one nearly
     merged arc, ``eta -> 1``) out to several ``b`` (two separated flanks,
-    ``eta -> 2``) traces the geometry-driven two-to-one transition; the shortfall of
-    ``eta`` below 2 in the overlap is the elastic coupling the single-stiffness law
-    folds into its fit residual.
+    ``eta -> 2``) traces the geometry-driven two-to-one transition. The solver value
+    ``eta = P/(K delta^{3/2})`` is returned alongside the reduced law's neighbour-lift
+    prediction at the same approach: each flank lifts the half-space under the other
+    by ``u ~ Q/(pi E* . 2 y0)``, so the coupled flank loads carry a sub-2 ``eta`` that
+    tracks the solver where the uncoupled single-``K`` superposition stays pinned at 2.
     """
-    eta = np.empty(separations_in_b.size)
+    radius_x, radius_y = gothic_radii(BALL, TUBE, CENTRE_RADIUS)
+    semi_minor_meridional = elliptic_hertz(radius_x, radius_y, load / 2.0, E_STAR)[1]
+    eta_solver = np.empty(separations_in_b.size)
+    eta_law = np.empty(separations_in_b.size)
     for i, separation in enumerate(separations_in_b):
         approach, total = two_flank_point(load, float(separation))
-        eta[i] = total / (stiffness * approach**1.5)
-    return eta
+        eta_solver[i] = total / (stiffness * approach**1.5)
+        # The coupled law at the solver's own approach, calibrated to the same flank
+        # (the contact angle is irrelevant to the symmetric flank-load split here).
+        y0 = float(separation) * semi_minor_meridional
+        law = hertzian.GothicArchLaw.from_elliptic_flank(
+            radius_x=radius_x, radius_y=radius_y, e_star=E_STAR, contact_angle=0.1
+        ).with_flank_coupling(e_star=E_STAR, offset=y0)
+        q_plus, q_minus = law.coupled_loads(approach, approach)
+        eta_law[i] = (q_plus + q_minus) / (stiffness * approach**1.5)
+    return eta_solver, eta_law
 
 
 # --------------------------------------------------------------------------- #
@@ -463,24 +478,34 @@ def _panel_kiss(ax: plt.Axes, xi: NDArray[np.float64], minus: NDArray[np.float64
 
 
 def _panel_coupling(
-    ax: plt.Axes, offsets_over_b: NDArray[np.float64], eta: NDArray[np.float64]
+    ax: plt.Axes,
+    offsets_over_b: NDArray[np.float64],
+    eta_solver: NDArray[np.float64],
+    eta_law: NDArray[np.float64],
 ) -> None:
-    """Draw the effective flank count from one merged arc to two separated flanks."""
+    """Draw the effective flank count: solver points and the coupled-law curve."""
     ax.axhline(1.0, color="0.6", lw=1.0, ls=":", label="1 flank (single arc)")
-    ax.axhline(2.0, color="0.6", lw=1.0, ls="--", label="2 flanks (separated)")
+    ax.axhline(2.0, color="0.6", lw=1.0, ls="--", label="2 flanks (uncoupled)")
     ax.plot(
         offsets_over_b,
-        eta,
-        color=SOLVER_COLOUR,
-        lw=1.8,
-        marker="o",
-        ms=4,
+        eta_law,
+        color=LAW_COLOUR,
+        lw=2.0,
+        label=r"coupled law  $u\sim Q/(\pi E^* \cdot 2y_0)$",
+    )
+    ax.scatter(
+        offsets_over_b,
+        eta_solver,
+        s=28,
+        c=SOLVER_COLOUR,
+        zorder=3,
         label=r"solver  $\eta = P/(K\delta^{3/2})$",
     )
+    ax.axvspan(0.4, 0.5, color="0.92", label="half overlap")
     ax.set_xlabel(r"flank separation  $y_0 / b$")
     ax.set_ylabel(r"effective flank count $\eta$")
     ax.set_title(
-        "(D) Geometry-driven 2 → 1: coupling fills the gap below 2",
+        "(D) Geometry-driven 2 → 1: the lift tracks η below 2",
         fontweight="bold",
         fontsize=10,
     )
@@ -516,14 +541,19 @@ def main() -> None:
     print(f"  unloading vs (1-xi)^1.5 : max residual {residual:.3f}")
 
     separations_over_b = np.linspace(0.4, 6.0, 12)
-    eta = coupling_curve(120.0, separations_over_b, cal.stiffness)
-    print(f"  effective flank count eta: {eta.min():.2f} (merged) -> {eta.max():.2f} (separated)")
+    eta_solver, eta_law = coupling_curve(120.0, separations_over_b, cal.stiffness)
+    print(
+        f"  effective flank count eta: {eta_solver.min():.2f} (merged) -> "
+        f"{eta_solver.max():.2f} (separated)"
+    )
+    coupling_residual = float(np.max(np.abs(eta_law - eta_solver) / eta_solver))
+    print(f"  coupled-law eta vs solver: max residual {100.0 * coupling_residual:.1f}%")
 
     fig, axes = plt.subplots(2, 2, figsize=(12.4, 9.0))
     _panel_calibration(axes[0, 0], cal)
     _panel_force(axes[0, 1], law)
     _panel_kiss(axes[1, 0], xi, minus)
-    _panel_coupling(axes[1, 1], separations_over_b, eta)
+    _panel_coupling(axes[1, 1], separations_over_b, eta_solver, eta_law)
     fig.suptitle(
         "hertzian — a reduced, C¹ two-flank contact law fit to the field solver",
         fontsize=13,

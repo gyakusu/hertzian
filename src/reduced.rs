@@ -57,12 +57,63 @@
 //! [`GothicArchLaw::jacobian`] returns the analytic tangent stiffness `dF/dδ` for
 //! implicit integrators, and is what the `C¹` continuity tests check across the
 //! lift-off seam.
+//!
+//! # Neighbour coupling: the flanks lift one another
+//!
+//! Superposing two *independent* Hertz flanks is exact only when they sit far
+//! enough apart to ignore one another — the well-separated limit, where each
+//! carries half the load and the effective flank count `η = P / (K δ^{3/2})` is
+//! `2`. As the groove shim is tightened the two flank contacts close in and their
+//! elastic fields overlap: the load `Q` on one flank lifts the half-space under
+//! the other, shrinking the neighbour's approach and so its load. To first order
+//! each flank sees the Boussinesq far field of the other — a point load `Q` a
+//! distance `d = 2 y0` away, since the flank centres sit at `y = ±y0`,
+//!
+//! ```text
+//! u ≈ Q / (π E* d),   d = 2 y0,
+//! ```
+//!
+//! so the two *effective* approaches couple through the loads they themselves set,
+//!
+//! ```text
+//! s_±^eff = s_± − κ Q_∓,   Q_± = K ⌊s_±^eff⌋₊^{3/2},   κ = 1 / (2 π E* y0),
+//! ```
+//!
+//! a small `2×2` self-consistent solve (one [`GothicArchLaw::with_flank_coupling`]
+//! call enables it). The lift pulls `η` below `2` in the half-overlap regime — the
+//! gap the single-`K` superposition would otherwise fold into its residual — and
+//! it sharpens the load split under an asymmetric drive (the heavier flank presses
+//! its lighter neighbour down harder). It leaves untouched the two limits the law
+//! already nails: as `y0 → ∞`, `κ → 0` and the flanks decouple (`η → 2`); and when
+//! a flank lifts off, `Q_∓ → 0` withdraws its lift, so the surviving single Hertz
+//! contact — and the `C¹` two-to-one handover — are exactly as before. Coupling is
+//! off (`κ = 0`) unless [`GothicArchLaw::with_flank_coupling`] sets it, so the
+//! separated two-flank law is the untouched default.
 
 use crate::validation::HertzElliptic;
 
 /// The Hertzian load exponent `3/2`. The single value the whole law — and its
 /// `C¹` two-to-one transition — turns on, named once so it reads as physics.
 const HERTZ_EXPONENT: f64 = 1.5;
+
+/// Newton steps for the coupled two-flank load solve (see [`GothicArchLaw::coupled_loads`]).
+///
+/// The neighbour-lift fixed point is a well-conditioned `2×2` system in the
+/// half-overlap range, so Newton from the uncoupled loads converges in a handful
+/// of steps; this cap is a safety net, not the expected count.
+const COUPLING_MAX_ITERS: usize = 32;
+
+/// Relative convergence tolerance for the coupled load solve.
+const COUPLING_TOL: f64 = 1.0e-13;
+
+/// Floor on the coupled-solve determinant `1 − κ² g_+ g_-`.
+///
+/// The determinant is positive while the cross-stiffness stays below the
+/// self-stiffness — the pull-in bound, which the half-overlap regime sits well
+/// inside. Clamping it keeps the Newton step and the analytic Jacobian finite if a
+/// caller pushes the coupling past that bound (the deep-merge regime reserved for
+/// the next stage), rather than dividing by zero.
+const COUPLING_MIN_DET: f64 = 1.0e-6;
 
 /// A reduced two-flank force law for a ball in a Gothic-arch groove.
 ///
@@ -75,6 +126,11 @@ const HERTZ_EXPONENT: f64 = 1.5;
 pub struct GothicArchLaw {
     stiffness: f64,
     contact_angle: f64,
+    /// Neighbour-lift cross-compliance `κ` (m·N⁻¹): one flank's load `Q` lifts the
+    /// half-space under the other by `κ Q`. Zero is the separated default (no
+    /// interaction); [`GothicArchLaw::with_flank_coupling`] sets it from the
+    /// geometry. See the [module docs](self#neighbour-coupling-the-flanks-lift-one-another).
+    coupling: f64,
 }
 
 impl GothicArchLaw {
@@ -103,6 +159,7 @@ impl GothicArchLaw {
         Self {
             stiffness,
             contact_angle,
+            coupling: 0.0,
         }
     }
 
@@ -131,10 +188,48 @@ impl GothicArchLaw {
         Self::new(stiffness, contact_angle)
     }
 
+    /// Enables the neighbour-lift coupling from the modulus `E*` and flank offset `y0`.
+    ///
+    /// Sets the cross-compliance `κ = 1 / (2 π E* y0)` — the Boussinesq far-field
+    /// lift `u ≈ Q / (π E* d)` of a flank load `Q` at the neighbour's centre, a
+    /// distance `d = 2 y0` away (see the [module
+    /// docs](self#neighbour-coupling-the-flanks-lift-one-another)). Builder-style so
+    /// it composes with the calibrating constructors:
+    /// `GothicArchLaw::from_elliptic_flank(..).with_flank_coupling(e_star, y0)`.
+    /// Without it the law keeps `κ = 0` — two independent flanks, the exact
+    /// well-separated limit.
+    ///
+    /// # Panics
+    /// Panics if `e_star` or `offset` is not strictly positive and finite.
+    #[must_use]
+    pub fn with_flank_coupling(self, e_star: f64, offset: f64) -> Self {
+        assert!(
+            e_star > 0.0 && e_star.is_finite(),
+            "modulus E* must be positive and finite",
+        );
+        assert!(
+            offset > 0.0 && offset.is_finite(),
+            "flank offset y0 must be positive and finite",
+        );
+        Self {
+            coupling: 1.0 / (2.0 * core::f64::consts::PI * e_star * offset),
+            ..self
+        }
+    }
+
     /// The per-flank Hertz stiffness `K` (N·m^−3/2).
     #[must_use]
     pub const fn stiffness(&self) -> f64 {
         self.stiffness
+    }
+
+    /// The neighbour-lift cross-compliance `κ` (m·N⁻¹); `0` when uncoupled.
+    ///
+    /// One flank's load `Q` lifts the half-space under the other by `κ Q`. Set by
+    /// [`GothicArchLaw::with_flank_coupling`]; `0` is the separated default.
+    #[must_use]
+    pub const fn coupling(&self) -> f64 {
+        self.coupling
     }
 
     /// The contact half-angle `α` (radians).
@@ -152,6 +247,14 @@ impl GothicArchLaw {
         self.stiffness * approach.max(0.0).powf(HERTZ_EXPONENT)
     }
 
+    /// One flank's tangent stiffness `dQ/ds = (3/2) K ⌊s⌋₊^{1/2}` at approach `s`.
+    ///
+    /// The slope of [`GothicArchLaw::flank_load`]; it vanishes as the flank unloads
+    /// (`s → 0⁺`), the `√`-soft engagement that makes the two-to-one handover `C¹`.
+    fn flank_tangent(&self, approach: f64) -> f64 {
+        HERTZ_EXPONENT * self.stiffness * approach.max(0.0).sqrt()
+    }
+
     /// The two flank approaches `(s_+, s_-)` for a ball-centre displacement.
     ///
     /// `s_± = δ_n cos α ± δ_t sin α` are the projections of `δ` onto the two flank
@@ -164,15 +267,58 @@ impl GothicArchLaw {
         (along + across, along - across)
     }
 
+    /// The two flank loads `(Q_+, Q_-)` for prescribed flank approaches `(s_+, s_-)`.
+    ///
+    /// The self-consistent solution of the coupled pair
+    /// `Q_± = K ⌊s_± − κ Q_∓⌋₊^{3/2}` (see the [module
+    /// docs](self#neighbour-coupling-the-flanks-lift-one-another)): each flank's
+    /// load is reduced by the lift `κ Q_∓` its neighbour raises under it. With
+    /// coupling off (`κ = 0`) this is exactly two independent Hertz loads
+    /// `(K⌊s_+⌋₊^{3/2}, K⌊s_-⌋₊^{3/2})`, the well-separated superposition. A few
+    /// Newton steps from that uncoupled seed converge the `2×2` fixed point; the
+    /// system is well-conditioned throughout the half-overlap range.
+    #[must_use]
+    pub fn coupled_loads(&self, s_plus: f64, s_minus: f64) -> (f64, f64) {
+        let mut q_plus = self.flank_load(s_plus);
+        let mut q_minus = self.flank_load(s_minus);
+        if self.coupling == 0.0 {
+            return (q_plus, q_minus);
+        }
+        let kappa = self.coupling;
+        for _ in 0..COUPLING_MAX_ITERS {
+            // Residual of Q_± = K⌊s_± − κ Q_∓⌋₊^{3/2} at the current loads.
+            let e_plus = s_plus - kappa * q_minus;
+            let e_minus = s_minus - kappa * q_plus;
+            let r_plus = q_plus - self.flank_load(e_plus);
+            let r_minus = q_minus - self.flank_load(e_minus);
+            // Newton step: the system matrix is [[1, κ g_+], [κ g_-, 1]], with
+            // g_i the per-flank tangent at the effective approach.
+            let g_plus = self.flank_tangent(e_plus);
+            let g_minus = self.flank_tangent(e_minus);
+            let det = (1.0 - kappa * kappa * g_plus * g_minus).max(COUPLING_MIN_DET);
+            let dq_plus = (r_plus - kappa * g_plus * r_minus) / det;
+            let dq_minus = (r_minus - kappa * g_minus * r_plus) / det;
+            q_plus = (q_plus - dq_plus).max(0.0);
+            q_minus = (q_minus - dq_minus).max(0.0);
+            if dq_plus.abs() + dq_minus.abs()
+                <= COUPLING_TOL * (q_plus + q_minus).max(f64::MIN_POSITIVE)
+            {
+                break;
+            }
+        }
+        (q_plus, q_minus)
+    }
+
     /// The two flank loads `(Q_+, Q_-)` for a ball-centre displacement.
     ///
-    /// Each is the Hertz load on that flank; in a separated two-flank contact they
-    /// are the loads the field solver measures over each half of the groove. When
-    /// one is zero the contact has dropped to a single flank.
+    /// Projects the displacement onto the flank approaches and applies
+    /// [`GothicArchLaw::coupled_loads`]; in a separated two-flank contact these are
+    /// the loads the field solver measures over each half of the groove. When one
+    /// is zero the contact has dropped to a single flank.
     #[must_use]
     pub fn flank_loads(&self, delta_t: f64, delta_n: f64) -> (f64, f64) {
         let (s_plus, s_minus) = self.flank_approaches(delta_t, delta_n);
-        (self.flank_load(s_plus), self.flank_load(s_minus))
+        self.coupled_loads(s_plus, s_minus)
     }
 
     /// The net contact force `(F_t, F_n)` for a ball-centre displacement `δ`.
@@ -191,28 +337,40 @@ impl GothicArchLaw {
     /// The analytic tangent stiffness `dF/dδ`, as `[[∂F_t/∂δ_t, ∂F_t/∂δ_n], …]`.
     ///
     /// The Jacobian of [`GothicArchLaw::force`], for implicit multibody
-    /// integrators and for pinning the law's continuity. With the per-flank
-    /// tangent `g_i = dQ_i/ds_i = (3/2) K ⌊s_i⌋₊^{1/2}` it is the symmetric matrix
+    /// integrators and for pinning the law's continuity. With the per-flank tangent
+    /// `g_i = (3/2) K ⌊s_i^eff⌋₊^{1/2}` at the *effective* approach and the coupled
+    /// determinant `D = 1 − κ² g_+ g_-`, differentiating the coupled force through
+    /// the implicit pair `Q_± = K⌊s_± − κ Q_∓⌋₊^{3/2}` gives the symmetric matrix
     ///
     /// ```text
-    /// [ (g_+ + g_-) sin²α     (g_+ − g_-) sin α cos α ]
-    /// [ (g_+ − g_-) sin α cos α   (g_+ + g_-) cos²α   ].
+    /// 1/D · [ (g_+ + g_- + 2κ g_+ g_-) sin²α        (g_+ − g_-) sin α cos α      ]
+    ///       [ (g_+ − g_-) sin α cos α          (g_+ + g_- − 2κ g_+ g_-) cos²α ].
     /// ```
     ///
-    /// Each `g_i → 0` as its flank unloads (`s_i → 0⁺`), so the matrix is
-    /// continuous across the two-to-one lift-off — the `C¹` property — while its
-    /// own derivative diverges there (`g_i ∝ √s_i`), so the law is not `C²`.
+    /// With coupling off (`κ = 0`) it is `D = 1` and the bare two-flank Jacobian
+    /// `[[(g_+ + g_-) sin²α, …], …]`. Each `g_i → 0` as its flank unloads
+    /// (`s_i^eff → 0⁺`), so the matrix is continuous across the two-to-one lift-off
+    /// — the `C¹` property, coupled or not — while its own derivative diverges there
+    /// (`g_i ∝ √s_i^eff`), so the law is not `C²`.
     #[must_use]
     pub fn jacobian(&self, delta_t: f64, delta_n: f64) -> [[f64; 2]; 2] {
         let (s_plus, s_minus) = self.flank_approaches(delta_t, delta_n);
-        let tangent = |s: f64| HERTZ_EXPONENT * self.stiffness * s.max(0.0).sqrt();
-        let g_plus = tangent(s_plus);
-        let g_minus = tangent(s_minus);
+        let (q_plus, q_minus) = self.coupled_loads(s_plus, s_minus);
+        let kappa = self.coupling;
+        // Tangents at the effective (post-lift) approaches: with κ = 0 these are the
+        // bare s_±, so the whole expression collapses to the uncoupled Jacobian.
+        let g_plus = self.flank_tangent(s_plus - kappa * q_minus);
+        let g_minus = self.flank_tangent(s_minus - kappa * q_plus);
         let (sin, cos) = self.contact_angle.sin_cos();
+        let det = (1.0 - kappa * kappa * g_plus * g_minus).max(COUPLING_MIN_DET);
         let sum = g_plus + g_minus;
         let diff = g_plus - g_minus;
-        let cross = diff * sin * cos;
-        [[sum * sin * sin, cross], [cross, sum * cos * cos]]
+        let coupled = 2.0 * kappa * g_plus * g_minus;
+        let cross = diff * sin * cos / det;
+        [
+            [(sum + coupled) * sin * sin / det, cross],
+            [cross, (sum - coupled) * cos * cos / det],
+        ]
     }
 
     /// The transverse displacement at which the inner flank lifts off.
@@ -478,5 +636,202 @@ mod tests {
             "no offset"
         );
         assert!(contact_half_angle(2.0e-3, 4.0e-3) < FRAC_PI_2, "below pi/2");
+    }
+
+    // --- neighbour-lift coupling ------------------------------------------- #
+
+    // The modulus and flank offset used to switch on coupling in these tests; the
+    // offset is small enough (relative to the contact) to give a clearly sub-unity
+    // β, i.e. the half-overlap regime where the 2×2 solve is well-conditioned.
+    const COUPLED_E_STAR: f64 = 100.0e9;
+    const COUPLED_OFFSET: f64 = 5.0e-4;
+
+    fn coupled_law() -> GothicArchLaw {
+        sample_law().with_flank_coupling(COUPLED_E_STAR, COUPLED_OFFSET)
+    }
+
+    #[test]
+    fn with_flank_coupling_sets_the_boussinesq_cross_compliance() {
+        // κ = 1 / (2 π E* y0): the Boussinesq far-field lift u = Q/(π E* d) of a
+        // flank load at its neighbour's centre, a distance d = 2 y0 away.
+        let law = coupled_law();
+        let expected = 1.0 / (2.0 * core::f64::consts::PI * COUPLED_E_STAR * COUPLED_OFFSET);
+        assert_close(law.coupling(), expected, 1.0e-12, "cross-compliance κ");
+        // The uncoupled law has κ = 0 (the separated default).
+        assert!(sample_law().coupling() == 0.0, "default is uncoupled");
+    }
+
+    #[test]
+    fn coupling_lowers_the_effective_flank_count_below_two() {
+        // A symmetric push loads both flanks equally; each lifts the other, so the
+        // pair carries less than the 2 K δ^{3/2} of two independent flanks — the
+        // effective flank count η = (Q_+ + Q_-)/(K δ^{3/2}) drops below 2. It must
+        // stay above 1 (the flanks still both carry load) and climb back toward 2
+        // as the offset grows and the coupling fades.
+        let delta = 6.0e-6;
+        let eta = |law: &GothicArchLaw| {
+            let (q_plus, q_minus) = law.coupled_loads(delta, delta);
+            (q_plus + q_minus) / (law.stiffness() * delta.powf(HERTZ_EXPONENT))
+        };
+
+        let near = coupled_law();
+        let far = sample_law().with_flank_coupling(COUPLED_E_STAR, 50.0e-3);
+        let separated = eta(&sample_law());
+
+        assert_close(separated, 2.0, 1.0e-12, "uncoupled η is exactly 2");
+        assert!(
+            eta(&near) > 1.0 && eta(&near) < 2.0,
+            "coupling pulls η into (1, 2): {}",
+            eta(&near),
+        );
+        assert!(
+            eta(&far) > eta(&near) && eta(&far) > 1.95,
+            "a far offset all but restores the separated η = 2",
+        );
+    }
+
+    #[test]
+    fn coupling_leaves_the_single_flank_limit_untouched() {
+        // Past lift-off the lower flank carries no load, so it lifts nothing: the
+        // coupled force must be bit-for-bit the uncoupled single Hertz contact.
+        let law = sample_law();
+        let coupled = coupled_law();
+        let delta_n = 5.0e-6;
+        let delta_t = 2.0 * law.lift_off_transverse(delta_n); // well past lift-off
+
+        let (_, s_minus) = coupled.flank_approaches(delta_t, delta_n);
+        assert!(s_minus < 0.0, "lower flank must be separated past lift-off");
+
+        let (ft_u, fn_u) = law.force(delta_t, delta_n);
+        let (ft_c, fn_c) = coupled.force(delta_t, delta_n);
+        assert_close(ft_c, ft_u, 1.0e-12, "single-flank F_t is coupling-free");
+        assert_close(fn_c, fn_u, 1.0e-12, "single-flank F_n is coupling-free");
+    }
+
+    #[test]
+    fn coupling_sharpens_the_load_split() {
+        // Under an asymmetric drive the heavier flank presses its lighter neighbour
+        // down harder than the reverse, so coupling *sharpens* the split Q_+/Q_-
+        // beyond the uncoupled (s_+/s_-)^{3/2}; and the lift lowers *both* loads.
+        let (s_plus, s_minus) = (9.0e-6, 4.0e-6);
+        let (qp_u, qm_u) = sample_law().coupled_loads(s_plus, s_minus); // κ = 0
+        let (qp_c, qm_c) = coupled_law().coupled_loads(s_plus, s_minus);
+
+        assert!(
+            qp_c / qm_c > qp_u / qm_u,
+            "coupling sharpens the split: {} vs {}",
+            qp_c / qm_c,
+            qp_u / qm_u,
+        );
+        assert!(
+            qp_c < qp_u && qm_c < qm_u,
+            "the lift lowers both flank loads"
+        );
+        // The uncoupled split is exactly the bare Hertz ratio.
+        assert_close(
+            qp_u / qm_u,
+            (s_plus / s_minus).powf(HERTZ_EXPONENT),
+            1.0e-12,
+            "uncoupled split is (s_+/s_-)^{3/2}",
+        );
+    }
+
+    #[test]
+    fn coupled_jacobian_matches_finite_differences_in_both_regimes() {
+        // The analytic coupled tangent stiffness (implicit-function differentiation
+        // through the 2×2 solve) must match a central difference of the coupled
+        // force, both where two flanks couple and past lift-off where one is off.
+        let law = coupled_law();
+        let delta_n = 6.0e-6;
+        let step = 1.0e-11;
+
+        for &delta_t in &[
+            0.3 * law.lift_off_transverse(delta_n), // two coupled flanks
+            1.8 * law.lift_off_transverse(delta_n), // one flank (coupling inert)
+        ] {
+            let analytic = law.jacobian(delta_t, delta_n);
+            let (ft_tp, fn_tp) = law.force(delta_t + step, delta_n);
+            let (ft_tm, fn_tm) = law.force(delta_t - step, delta_n);
+            let (ft_np, fn_np) = law.force(delta_t, delta_n + step);
+            let (ft_nm, fn_nm) = law.force(delta_t, delta_n - step);
+            let numeric = [
+                [
+                    (ft_tp - ft_tm) / (2.0 * step),
+                    (ft_np - ft_nm) / (2.0 * step),
+                ],
+                [
+                    (fn_tp - fn_tm) / (2.0 * step),
+                    (fn_np - fn_nm) / (2.0 * step),
+                ],
+            ];
+            for row in 0..2 {
+                for col in 0..2 {
+                    assert_close(
+                        numeric[row][col],
+                        analytic[row][col],
+                        1.0e-4,
+                        "coupled jacobian entry vs finite difference",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_jacobian_is_symmetric() {
+        // The coupled contact is still conservative: the cross terms agree exactly
+        // (the κ g_+ g_- pieces cancel out of the off-diagonal).
+        let jac = coupled_law().jacobian(2.0e-6, 7.0e-6);
+        assert_close(jac[0][1], jac[1][0], 1.0e-12, "coupled Jacobian symmetry");
+    }
+
+    #[test]
+    fn coupled_two_to_one_transition_stays_c1() {
+        // Coupling must not spoil the headline property: the force and its Jacobian
+        // are still continuous across the lift-off seam, because the unloading flank
+        // vanishes in load *and* stiffness *and* lift as s_-^eff → 0⁺.
+        let law = coupled_law();
+        let delta_n = 5.0e-6;
+        let seam = law.lift_off_transverse(delta_n);
+        let step = 1.0e-10;
+
+        let (_, s_below) = law.flank_approaches(seam - step, delta_n);
+        let (_, s_above) = law.flank_approaches(seam + step, delta_n);
+        assert!(
+            s_below > 0.0 && s_above < 0.0,
+            "step must straddle lift-off"
+        );
+
+        let (ft_b, fn_b) = law.force(seam - step, delta_n);
+        let (ft_a, fn_a) = law.force(seam + step, delta_n);
+        let scale = ft_b.abs().max(fn_b.abs());
+        assert!(
+            (ft_b - ft_a).abs() <= 1.0e-3 * scale && (fn_b - fn_a).abs() <= 1.0e-3 * scale,
+            "coupled force is continuous across lift-off",
+        );
+
+        let jac_b = law.jacobian(seam - step, delta_n);
+        let jac_a = law.jacobian(seam + step, delta_n);
+        let jac_scale = jac_b[1][1].abs();
+        for row in 0..2 {
+            for col in 0..2 {
+                assert!(
+                    (jac_b[row][col] - jac_a[row][col]).abs() <= 1.0e-2 * jac_scale,
+                    "coupled tangent stiffness is continuous across lift-off (C¹)",
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "modulus E*")]
+    fn with_flank_coupling_rejects_a_non_positive_modulus() {
+        let _ = sample_law().with_flank_coupling(0.0, COUPLED_OFFSET);
+    }
+
+    #[test]
+    #[should_panic(expected = "flank offset")]
+    fn with_flank_coupling_rejects_a_non_positive_offset() {
+        let _ = sample_law().with_flank_coupling(COUPLED_E_STAR, 0.0);
     }
 }

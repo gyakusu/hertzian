@@ -746,6 +746,196 @@ mod tests {
     }
 
     #[test]
+    fn gothic_coupling_tracks_the_effective_flank_count() {
+        // The neighbour-lift coupling (crate::reduced) earns its keep here. As the
+        // groove shim is tightened from well-separated flanks down to a half overlap
+        // (y0 = b/2), the field solver's effective flank count η = P/(K δ^{3/2})
+        // falls from near 2 toward 1: each flank lifts the half-space under the
+        // other, so the pair carries less than two independent P/2 patches at the
+        // same approach. The uncoupled superposition is frozen at η = 2; the
+        // first-order lift `u = Q/(π E* · 2 y0)` closes almost all of that gap — to
+        // a few percent through the half-overlap regime and to well under 1% once
+        // the flanks separate (where the compact-source approximation is exact).
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 120.0;
+        let config = Config {
+            tolerance: 1.0e-8,
+            max_iterations: 40_000,
+        };
+
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let b = flank.semi_axis_y();
+        let ax = flank.semi_axis_x();
+        let stiffness = GothicArchLaw::from_elliptic_flank(
+            radii.radius_x(),
+            radii.radius_y(),
+            material.e_star(),
+            0.4,
+        )
+        .stiffness();
+
+        // (y0/b, tolerance): tight once the flanks separate, a few percent at the
+        // half overlap where the point-load-at-d=2y0 model is weakest.
+        let cases = [
+            (0.5_f64, 0.09),
+            (0.75, 0.06),
+            (1.0, 0.035),
+            (1.5, 0.02),
+            (2.0, 0.02),
+        ];
+        let mut last_eta = 0.0_f64;
+        for &(ratio, tol) in &cases {
+            let y0 = ratio * b;
+            let centre_offset = y0 * (tube - ball) / ball;
+            let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+            let dx = ax / 8.0;
+            let dy = b / 8.0;
+            let nx = even_ceil(2.0 * 2.5 * ax / dx);
+            let ny = even_ceil(2.0 * (y0 + 2.5 * b) / dy);
+            let grid = Grid::new(nx, ny, dx, dy);
+            let sol = sphere_in_gothic_arch(ball, groove, load, material, grid, config);
+            assert!(
+                sol.diagnostics().converged,
+                "solver did not converge at y0/b={ratio}",
+            );
+
+            let delta = sol.approach();
+            let eta_solver = sol.total_load() / (stiffness * delta.powf(1.5));
+
+            let law = GothicArchLaw::from_elliptic_flank(
+                radii.radius_x(),
+                radii.radius_y(),
+                material.e_star(),
+                0.4,
+            )
+            .with_flank_coupling(material.e_star(), y0);
+            let (q_plus, q_minus) = law.coupled_loads(delta, delta);
+            let eta_law = (q_plus + q_minus) / (stiffness * delta.powf(1.5));
+
+            // η lies strictly between the merged single arc (1) and two separated
+            // flanks (2), and rises monotonically as the flanks pull apart.
+            assert!(
+                eta_solver > 1.0 && eta_solver < 2.0,
+                "η out of (1, 2) at y0/b={ratio}: {eta_solver}",
+            );
+            assert!(
+                eta_solver > last_eta,
+                "η must rise as the flanks separate (y0/b={ratio})",
+            );
+            last_eta = eta_solver;
+
+            // The coupled law tracks the solver to the per-point tolerance ...
+            assert_relative(eta_law, eta_solver, tol, "coupled η vs solver");
+            // ... and closes most of the gap the uncoupled η = 2 would leave.
+            let gap_uncoupled = (2.0 - eta_solver).abs();
+            let gap_coupled = (eta_law - eta_solver).abs();
+            assert!(
+                gap_coupled < 0.4 * gap_uncoupled,
+                "coupling must close most of the η gap at y0/b={ratio}: \
+                 coupled {gap_coupled:e} vs uncoupled {gap_uncoupled:e}",
+            );
+        }
+    }
+
+    #[test]
+    fn gothic_coupling_captures_the_load_split() {
+        // The directional check: under an asymmetric drive the load divides
+        // unevenly between the flanks, and that split P_+:P_- is the force
+        // direction. A lateral drive lowers the + well floor and raises the − one
+        // (the half-space stand-in for nudging the ball toward one flank), so the
+        // bare flank approaches become s_± = δ ± drive. The coupled law must
+        // reproduce the solver's split — including the way the lift *sharpens* it
+        // (the heavier flank presses its lighter neighbour down harder) — where the
+        // first-order term holds: at the onset of overlap (y0 = b), the uncoupled
+        // (s_+/s_-)^{3/2} is already ~20% low, and the coupling all but closes it.
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 120.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 40_000,
+        };
+
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let (radius_x, radius_y) = (radii.radius_x(), radii.radius_y());
+        let flank = HertzElliptic::new(radius_x, radius_y, load / 2.0, material.e_star());
+        let b = flank.semi_axis_y();
+        let ax = flank.semi_axis_x();
+
+        let y0 = b; // onset of overlap: the flank patches just meet at the centre
+        let dx = ax / 6.0;
+        let dy = b / 10.0;
+        let nx = even_ceil(2.0 * 2.5 * ax / dx);
+        let ny = even_ceil(2.0 * (y0 + 2.5 * b) / dy);
+        let grid = Grid::new(nx, ny, dx, dy);
+        let mid = ny / 2;
+        let cell = grid.cell_area();
+        let law = GothicArchLaw::from_elliptic_flank(radius_x, radius_y, material.e_star(), 0.4)
+            .with_flank_coupling(material.e_star(), y0);
+
+        // Solve one asymmetric drive and read the per-half loads the solver splits
+        // the contact into (each half-plane of the groove centre is one flank).
+        let split_at = |drive: f64| {
+            let gap = grid.sample(|x, y| {
+                let well_plus = (y - y0).powi(2) / (2.0 * radius_y) - drive;
+                let well_minus = (y + y0).powi(2) / (2.0 * radius_y) + drive;
+                x * x / (2.0 * radius_x) + well_plus.min(well_minus)
+            });
+            let sol = solve_sampled_gap(gap, material, load, grid.clone(), config);
+            assert!(sol.diagnostics().converged, "split solve did not converge");
+            let pressure = sol.pressure();
+            let upper: f64 = pressure
+                .indexed_iter()
+                .filter(|&((_, j), _)| j >= mid)
+                .map(|(_, &p)| p * cell)
+                .sum();
+            let lower: f64 = pressure
+                .indexed_iter()
+                .filter(|&((_, j), _)| j < mid)
+                .map(|(_, &p)| p * cell)
+                .sum();
+            (upper / lower, sol.approach())
+        };
+
+        // A straight push splits the load evenly — the symmetric anchor.
+        let (split_sym, _) = split_at(0.0);
+        assert_relative(split_sym, 1.0, 0.02, "symmetric split is 1:1");
+
+        // An asymmetric drive: the coupled law lands within a few percent of the
+        // solver, while the uncoupled bare ratio is far short.
+        let drive = 0.25 * 2.0e-6;
+        let (split_solver, delta) = split_at(drive);
+        let (q_plus, q_minus) = law.coupled_loads(delta + drive, delta - drive);
+        let split_coupled = q_plus / q_minus;
+        let split_uncoupled = ((delta + drive) / (delta - drive)).powf(1.5);
+
+        assert!(
+            split_solver > 2.0,
+            "the drive must produce a clearly asymmetric split (got {split_solver})",
+        );
+        assert_relative(split_coupled, split_solver, 0.06, "coupled split vs solver");
+        assert!(
+            (split_uncoupled - split_solver).abs() > 0.12 * split_solver,
+            "the uncoupled split must be visibly off ({split_uncoupled} vs {split_solver})",
+        );
+        assert!(
+            (split_coupled - split_solver).abs() < (split_uncoupled - split_solver).abs(),
+            "coupling must move the split toward the solver, not away",
+        );
+    }
+
+    #[test]
     fn cone_on_flat_matches_sneddon() {
         // P4 arbitrary-shape benchmark: a rigid cone fed through the height-field
         // path reproduces Sneddon's closed-form contact radius, approach and
