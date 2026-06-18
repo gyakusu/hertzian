@@ -89,6 +89,22 @@
 //! contact — and the `C¹` two-to-one handover — are exactly as before. Coupling is
 //! off (`κ = 0`) unless [`GothicArchLaw::with_flank_coupling`] sets it, so the
 //! separated two-flank law is the untouched default.
+//!
+//! This first-order lift is a *magnitude* correction: it acts in the flank-approach
+//! frame ([`GothicArchLaw::coupled_loads`]) and so it sets the load split `Q_+ : Q_-`
+//! — the direction in which the force divides between the flanks — without touching
+//! the flank normals. It tracks the field solver's effective flank count `η(y0/b)`
+//! and its load split to a few percent through the half-overlap regime. A *second*,
+//! finer directional effect remains: as the contacts overlap, each flank lifts its
+//! neighbour's *inboard* side more than its outboard one, so the load centroid
+//! slides outboard of the geometric offset (the field solver shows it ~36 % beyond
+//! `y0` at half overlap, decaying to `y0` once separated). That is the flank
+//! *normal* rotating — a steeper effective contact angle `α_eff(y0/b) =
+//! arcsin(y_centroid / R_s)`, with `α_eff → α` separated — which one applies by
+//! building the law at that effective angle (via [`contact_half_angle`]). It refines
+//! only the `(F_t, F_n)` projection, not the `η`/split this stage validates, and is
+//! left, with the full coalescence to `η = 1` (a blend onto the single arch), as the
+//! next stage.
 
 use crate::validation::HertzElliptic;
 
@@ -392,6 +408,12 @@ impl GothicArchLaw {
 /// is the small-shim estimate used to orient the flank normals; the force
 /// magnitudes (via the stiffness `K`) come from the field solver, so `α` only
 /// sets the *direction* split between transverse and normal force.
+///
+/// This is the *geometric* (well-separated) angle. When the flanks overlap their
+/// load centroid slides outboard of `y0` (see the [module
+/// docs](self#neighbour-coupling-the-flanks-lift-one-another)); passing that
+/// shifted centroid here yields the steeper *effective* angle `α_eff(y0/b)` for the
+/// force projection, which relaxes back to this geometric `α` as the flanks part.
 ///
 /// # Panics
 /// Panics if `ball_radius` is not strictly positive and finite, or if `offset` is
