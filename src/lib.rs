@@ -47,7 +47,7 @@ pub use grid::Grid;
 pub use influence::{DirectSum, FreeSpaceBoussinesq, InfluenceOperator};
 pub use material::Material;
 pub use problem::{Control, Problem};
-pub use reduced::{contact_half_angle, GothicArchLaw};
+pub use reduced::{contact_half_angle, FlankPressure, GothicArchLaw};
 pub use reference::DenseReference;
 pub use solution::{Diagnostics, Solution};
 pub use solver::{Bccg, Config, Solver};
