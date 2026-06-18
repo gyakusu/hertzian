@@ -26,7 +26,10 @@ use pyo3::prelude::*;
 use crate::geometry::{GothicArchGroove, Torus};
 use crate::grid::Grid;
 use crate::material::Material;
-use crate::reduced::{contact_half_angle as core_contact_half_angle, GothicArchLaw as CoreLaw};
+use crate::reduced::{
+    contact_half_angle as core_contact_half_angle, FlankPressure as CoreFlankPressure,
+    GothicArchLaw as CoreLaw,
+};
 use crate::scenarios::{
     solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat, sphere_on_sphere, sphere_on_torus,
 };
@@ -42,6 +45,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Solution>()?;
     module.add_class::<Diagnostics>()?;
     module.add_class::<GothicArchLaw>()?;
+    module.add_class::<FlankPressure>()?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_flat, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_sphere, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_torus, module)?)?;
@@ -305,12 +309,96 @@ impl GothicArchLaw {
         self.inner.lift_off_transverse(delta_n)
     }
 
+    /// One flank's pressure footprint at a flank load `Q` — the Coulomb-friction cap.
+    ///
+    /// Scales the calibrated unit-load contact ellipse by `Q^{1/3}` (Hertz) into the
+    /// half-ellipsoid `p(x, y)` a Coulomb model caps the tangential traction by
+    /// (`|τ| ≤ μ p`). `load` is a (coupled) flank load from
+    /// [`coupled_loads`](Self::coupled_loads) / [`flank_loads`](Self::flank_loads).
+    /// Raises ``ValueError`` if the law was built with the bare constructor
+    /// (stiffness + angle), which does not fix the contact-ellipse shape; calibrate
+    /// with [`from_elliptic_flank`](Self::from_elliptic_flank).
+    fn flank_pressure(&self, load: f64) -> PyResult<FlankPressure> {
+        self.inner
+            .flank_pressure(load)
+            .map(|inner| FlankPressure { inner })
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "flank_pressure requires a shape-calibrated law; build it with \
+                     GothicArchLaw.from_elliptic_flank",
+                )
+            })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "GothicArchLaw(stiffness={:.6e}, contact_angle={:.6e}, coupling={:.6e})",
             self.inner.stiffness(),
             self.inner.contact_angle(),
             self.inner.coupling(),
+        )
+    }
+}
+
+/// One flank's elliptic-Hertz pressure footprint — the Coulomb-friction cap.
+///
+/// The distribution `p(x, y)` the reduced law's per-flank load implies, for a
+/// tangential-contact model that caps the local friction stress at `|τ| ≤ μ p`.
+/// Built by [`GothicArchLaw.flank_pressure`] from a (coupled) flank load: a
+/// flank-local elliptic-Hertz half-ellipsoid `p = p0 √⌊1 − (x/a_x)² − (y/a_y)²⌋₊`
+/// that integrates to the load exactly, so the full-sliding resultant is `μ Q`.
+/// Immutable from Python.
+#[pyclass(name = "FlankPressure", module = "hertzian._core", frozen)]
+struct FlankPressure {
+    inner: CoreFlankPressure,
+}
+
+#[pymethods]
+impl FlankPressure {
+    /// Peak (central) contact pressure `p0` (pascals); `0` for a lifted-off flank.
+    #[getter]
+    const fn peak_pressure(&self) -> f64 {
+        self.inner.peak_pressure()
+    }
+
+    /// Mean contact pressure `(2/3) p0` (pascals).
+    #[getter]
+    fn mean_pressure(&self) -> f64 {
+        self.inner.mean_pressure()
+    }
+
+    /// Contact semi-axes `(a_x, a_y)` along the flank's circumferential/meridional
+    /// axes (metres); `(0, 0)` for a lifted-off flank.
+    #[getter]
+    const fn semi_axes(&self) -> (f64, f64) {
+        self.inner.semi_axes()
+    }
+
+    /// The flank load `Q = (2/3) π a_x a_y p0` recovered by integrating the
+    /// half-ellipsoid (newtons) — exact by construction.
+    #[getter]
+    fn load(&self) -> f64 {
+        self.inner.load()
+    }
+
+    /// Pressure at flank-local `(x, y)`: `p0 √⌊1 − (x/a_x)² − (y/a_y)²⌋₊` (pascals).
+    fn pressure_at(&self, x: f64, y: f64) -> f64 {
+        self.inner.pressure_at(x, y)
+    }
+
+    /// The Coulomb traction bound `μ p(x, y)` at flank-local `(x, y)` (pascals).
+    ///
+    /// The cap the local friction stress cannot exceed; integrates to `μ Q`.
+    fn traction_bound(&self, mu: f64, x: f64, y: f64) -> PyResult<f64> {
+        require_non_negative(mu, "mu")?;
+        Ok(self.inner.traction_bound(mu, x, y))
+    }
+
+    fn __repr__(&self) -> String {
+        let (a_x, a_y) = self.inner.semi_axes();
+        format!(
+            "FlankPressure(peak_pressure={:.6e}, semi_axes=({a_x:.6e}, {a_y:.6e}))",
+            self.inner.peak_pressure(),
         )
     }
 }

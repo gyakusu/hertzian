@@ -220,3 +220,82 @@ def test_invalid_inputs_raise() -> None:
         _law().with_flank_coupling(e_star=-1.0, offset=5.0e-4)
     with pytest.raises(ValueError, match="offset"):
         _law().with_flank_coupling(e_star=100.0e9, offset=0.0)
+
+
+# --- per-flank pressure: the Coulomb-friction cap ----------------------------
+
+# An illustrative dry-steel-ish friction coefficient for the traction-bound checks.
+MU = 0.12
+
+
+def test_flank_pressure_is_a_half_ellipsoid() -> None:
+    """The cap peaks at p0, vanishes on the rim, and averages 2/3 p0."""
+    cap = _law().flank_pressure(200.0)
+    a_x, a_y = cap.semi_axes
+    p0 = cap.peak_pressure
+    assert math.isclose(cap.pressure_at(0.0, 0.0), p0, rel_tol=EXACT_RTOL)
+    assert abs(cap.pressure_at(a_x, 0.0)) <= 1e-9 * p0
+    assert abs(cap.pressure_at(0.0, a_y)) <= 1e-9 * p0
+    assert cap.pressure_at(1.1 * a_x, 0.0) == 0.0
+    assert math.isclose(cap.mean_pressure, 2.0 / 3.0 * p0, rel_tol=EXACT_RTOL)
+
+
+def test_flank_pressure_integrates_to_the_load() -> None:
+    """The half-ellipsoid carries exactly Q, so ∫ μ p dA = μ Q (full sliding)."""
+    load = 130.0
+    cap = _law().flank_pressure(load)
+    assert math.isclose(cap.load, load, rel_tol=EXACT_RTOL)
+
+    a_x, a_y = cap.semi_axes
+    x = np.linspace(-a_x, a_x, 401)
+    y = np.linspace(-a_y, a_y, 401)
+    field = np.array([[cap.pressure_at(float(xi), float(yj)) for yj in y] for xi in x])
+    integral = field.sum() * (x[1] - x[0]) * (y[1] - y[0])
+    assert math.isclose(integral, load, rel_tol=2e-3)
+
+
+def test_flank_pressure_peak_scales_as_the_cube_root_of_load() -> None:
+    """p0 = c_p Q^{1/3}: eight times the load is twice the peak and twice the axes."""
+    cap = _law().flank_pressure(50.0)
+    cap8 = _law().flank_pressure(8.0 * 50.0)
+    assert math.isclose(cap8.peak_pressure, 2.0 * cap.peak_pressure, rel_tol=EXACT_RTOL)
+    assert math.isclose(cap8.semi_axes[0], 2.0 * cap.semi_axes[0], rel_tol=EXACT_RTOL)
+    assert math.isclose(cap8.semi_axes[1], 2.0 * cap.semi_axes[1], rel_tol=EXACT_RTOL)
+
+
+def test_traction_bound_is_mu_times_the_pressure() -> None:
+    """The Coulomb cap is μ p; a zero coefficient caps at zero everywhere."""
+    cap = _law().flank_pressure(75.0)
+    a_x, a_y = cap.semi_axes
+    assert math.isclose(
+        cap.traction_bound(MU, 0.25 * a_x, 0.15 * a_y),
+        MU * cap.pressure_at(0.25 * a_x, 0.15 * a_y),
+        rel_tol=EXACT_RTOL,
+    )
+    assert cap.traction_bound(0.0, 0.0, 0.0) == 0.0
+
+
+def test_coupled_loads_feed_the_pressure_cap() -> None:
+    """The footprint built from a coupled flank load carries that load exactly."""
+    law = _coupled_law()
+    q_plus, _ = law.flank_loads(2.0e-6, 6.0e-6)
+    cap = law.flank_pressure(q_plus)
+    assert math.isclose(cap.load, q_plus, rel_tol=EXACT_RTOL)
+    assert cap.peak_pressure > 0.0
+
+
+def test_a_lifted_off_flank_has_a_zero_cap() -> None:
+    """A non-positive (separated) load gives a zero footprint, capping at zero."""
+    cap = _law().flank_pressure(0.0)
+    assert cap.peak_pressure == 0.0
+    assert cap.semi_axes == (0.0, 0.0)
+    assert cap.pressure_at(0.0, 0.0) == 0.0
+    assert cap.load == 0.0
+
+
+def test_flank_pressure_requires_a_calibrated_shape() -> None:
+    """The bare constructor has no contact-ellipse shape, so it cannot cap pressure."""
+    with pytest.raises(ValueError, match="from_elliptic_flank"):
+        hertzian.GothicArchLaw(stiffness=1.0e9, contact_angle=0.4).flank_pressure(100.0)
+    with pytest.raises(ValueError, match="mu"):
+        _law().flank_pressure(100.0).traction_bound(-0.1, 0.0, 0.0)

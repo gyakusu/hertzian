@@ -105,6 +105,34 @@
 //! only the `(F_t, F_n)` projection, not the `η`/split this stage validates, and is
 //! left, with the full coalescence to `η = 1` (a blend onto the single arch), as the
 //! next stage.
+//!
+//! # Per-flank pressure: the Coulomb-friction cap
+//!
+//! `F(δ)` is the *resultant*; a Coulomb friction model needs the *distribution* the
+//! tangential traction is capped by, `|τ(x, y)| ≤ μ p(x, y)`. Each flank is an
+//! elliptic-Hertz contact carrying its (coupled) load `Q`, so its pressure is the
+//! half-ellipsoid
+//!
+//! ```text
+//! p(x, y) = p0 √⌊1 − (x/a_x)² − (y/a_y)²⌋₊,   p0 = 3 Q / (2π a_x a_y),
+//! ```
+//!
+//! flank-local (the caller centres it at `±y_c`). The shape is fixed *once*, from the
+//! same flank the stiffness `K` is calibrated from: by Hertz's cube-root load scaling
+//! the semi-axes are `a = a_unit Q^{1/3}`, so the peak is `p0 = c_p Q^{1/3}` with
+//! `c_p = 3 / (2π a_x^unit a_y^unit)`, and [`GothicArchLaw::flank_pressure`] builds the
+//! footprint ([`FlankPressure`]) in a couple of `cbrt`s — no eccentricity solve in the
+//! inner loop. Because `Q = K s^{3/2}`, the peak is `p0 = c_p K^{1/3} √s`: the cap
+//! kisses zero as `√s` at lift-off, the same `3/2`-power signature that makes the
+//! force `C¹` there. The half-ellipsoid integrates to `Q` exactly, so the full-sliding
+//! friction resultant is `∫ μ p dA = μ Q` per flank.
+//!
+//! This is exact, per flank, where the two footprints are *resolved* as distinct
+//! patches — the separated regime, the common two-flank bearing the section is built
+//! around. As the shim closes to half overlap the patches merge into one connected
+//! contact whose seam is *not* the sum of the two half-ellipsoids (superposing them
+//! double-counts the overlap); that single-patch coalescence is the same next stage
+//! as the `η → 1` blend onto the single arch.
 
 use crate::validation::HertzElliptic;
 
@@ -131,13 +159,28 @@ const COUPLING_TOL: f64 = 1.0e-13;
 /// the next stage), rather than dividing by zero.
 const COUPLING_MIN_DET: f64 = 1.0e-6;
 
+/// One flank's contact-ellipse semi-axes at unit load (m·N^−1/3).
+///
+/// The calibrated shape behind the per-flank pressure model: by Hertz's cube-root
+/// load scaling the semi-axes at a flank load `Q` are `a = a_unit · Q^{1/3}`, so
+/// these two unit-load semi-axes fix the whole footprint ([`FlankPressure`]). Set by
+/// [`GothicArchLaw::from_elliptic_flank`]; absent for the bare [`GothicArchLaw::new`],
+/// whose stiffness `K` alone does not pin the contact-ellipse shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FlankReference {
+    semi_axis_x: f64,
+    semi_axis_y: f64,
+}
+
 /// A reduced two-flank force law for a ball in a Gothic-arch groove.
 ///
 /// A closed-form `F(δ_t, δ_n) → (F_t, F_n)` map (see the [module
 /// docs](self)) built from one flank's Hertz stiffness `K` and the contact
 /// half-angle `α`. Evaluating it is a couple of `powf`s — cheap enough for a
 /// multibody inner loop — and it reproduces, by construction, both the single
-/// Hertz contact in the one-flank limit and a `C¹` two-to-one transition.
+/// Hertz contact in the one-flank limit and a `C¹` two-to-one transition. When
+/// calibrated from a flank shape it also yields the per-flank pressure footprint
+/// ([`GothicArchLaw::flank_pressure`]), the Coulomb-friction cap `|τ| ≤ μ p`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GothicArchLaw {
     stiffness: f64,
@@ -147,6 +190,10 @@ pub struct GothicArchLaw {
     /// interaction); [`GothicArchLaw::with_flank_coupling`] sets it from the
     /// geometry. See the [module docs](self#neighbour-coupling-the-flanks-lift-one-another).
     coupling: f64,
+    /// The flank's unit-load contact-ellipse semi-axes, when calibrated from a flank
+    /// shape ([`GothicArchLaw::from_elliptic_flank`]); `None` for the bare
+    /// [`GothicArchLaw::new`]. Backs [`GothicArchLaw::flank_pressure`].
+    reference: Option<FlankReference>,
 }
 
 impl GothicArchLaw {
@@ -176,6 +223,7 @@ impl GothicArchLaw {
             stiffness,
             contact_angle,
             coupling: 0.0,
+            reference: None,
         }
     }
 
@@ -199,9 +247,17 @@ impl GothicArchLaw {
         e_star: f64,
         contact_angle: f64,
     ) -> Self {
-        let reference = HertzElliptic::new(radius_x, radius_y, 1.0, e_star);
-        let stiffness = reference.approach().powf(-HERTZ_EXPONENT);
-        Self::new(stiffness, contact_angle)
+        let hertz = HertzElliptic::new(radius_x, radius_y, 1.0, e_star);
+        let stiffness = hertz.approach().powf(-HERTZ_EXPONENT);
+        // The unit-load contact semi-axes are the calibrated shape the per-flank
+        // pressure model scales by `Q^{1/3}` (see [`GothicArchLaw::flank_pressure`]).
+        Self {
+            reference: Some(FlankReference {
+                semi_axis_x: hertz.semi_axis_x(),
+                semi_axis_y: hertz.semi_axis_y(),
+            }),
+            ..Self::new(stiffness, contact_angle)
+        }
     }
 
     /// Enables the neighbour-lift coupling from the modulus `E*` and flank offset `y0`.
@@ -397,6 +453,123 @@ impl GothicArchLaw {
     #[must_use]
     pub fn lift_off_transverse(&self, delta_n: f64) -> f64 {
         delta_n / self.contact_angle.tan()
+    }
+
+    /// One flank's pressure footprint at a flank load `Q` — the Coulomb-friction cap.
+    ///
+    /// Turns a (coupled) flank load from [`GothicArchLaw::coupled_loads`] /
+    /// [`GothicArchLaw::flank_loads`] into the elliptic-Hertz half-ellipsoid
+    /// [`FlankPressure`] a Coulomb model rides under, by scaling the calibrated
+    /// unit-load semi-axes by `Q^{1/3}` (Hertz) and reading `p0 = 3Q/(2π a_x a_y)`
+    /// — a couple of `cbrt`s, no eccentricity solve (see the [module
+    /// docs](self#per-flank-pressure-the-coulomb-friction-cap)).
+    ///
+    /// Returns `None` if the law was built with the bare [`GothicArchLaw::new`]
+    /// (stiffness + angle only), which does not fix the contact-ellipse shape;
+    /// calibrate with [`GothicArchLaw::from_elliptic_flank`]. A non-positive load
+    /// (a lifted-off flank) gives a zero footprint that caps the traction at zero.
+    #[must_use]
+    pub fn flank_pressure(&self, load: f64) -> Option<FlankPressure> {
+        let reference = self.reference?;
+        let scale = load.max(0.0).cbrt();
+        let semi_axis_x = reference.semi_axis_x * scale;
+        let semi_axis_y = reference.semi_axis_y * scale;
+        let peak_pressure = if load > 0.0 {
+            3.0 * load / (2.0 * core::f64::consts::PI * semi_axis_x * semi_axis_y)
+        } else {
+            0.0
+        };
+        Some(FlankPressure {
+            peak_pressure,
+            semi_axis_x,
+            semi_axis_y,
+        })
+    }
+}
+
+/// One flank's elliptic-Hertz pressure footprint — the Coulomb-friction cap.
+///
+/// The reduced law hands a multibody integrator the *resultant* `F(δ)`; a Coulomb
+/// friction model needs the *distribution* the tangential traction is capped by,
+/// `|τ| ≤ μ p`. This is that distribution for one flank carrying a (coupled) load
+/// `Q`: the flank-local elliptic-Hertz half-ellipsoid (see the [module
+/// docs](self#per-flank-pressure-the-coulomb-friction-cap))
+///
+/// ```text
+/// p(x, y) = p0 √⌊1 − (x/a_x)² − (y/a_y)²⌋₊,   p0 = 3 Q / (2π a_x a_y).
+/// ```
+///
+/// Built by [`GothicArchLaw::flank_pressure`] in a couple of `cbrt`s. It is centred
+/// on the flank's own contact centre; the caller places it at `±y_c`. It integrates
+/// to `Q` exactly, so the full-sliding friction resultant is `∫ μ p dA = μ Q`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlankPressure {
+    peak_pressure: f64,
+    semi_axis_x: f64,
+    semi_axis_y: f64,
+}
+
+impl FlankPressure {
+    /// Peak (central) contact pressure `p0` (pascals); `0` for a lifted-off flank.
+    #[must_use]
+    pub const fn peak_pressure(&self) -> f64 {
+        self.peak_pressure
+    }
+
+    /// Mean contact pressure `(2/3) p0` (pascals) — the half-ellipsoid's load average.
+    #[must_use]
+    pub fn mean_pressure(&self) -> f64 {
+        2.0 / 3.0 * self.peak_pressure
+    }
+
+    /// Contact semi-axes `(a_x, a_y)` along the flank's circumferential/meridional
+    /// axes (metres); `(0, 0)` for a lifted-off flank.
+    #[must_use]
+    pub const fn semi_axes(&self) -> (f64, f64) {
+        (self.semi_axis_x, self.semi_axis_y)
+    }
+
+    /// The flank load `Q = (2/3) π a_x a_y p0` recovered by integrating the
+    /// half-ellipsoid over its footprint (newtons).
+    ///
+    /// Exact by construction — the footprint carries the load it was built from — so
+    /// the full-sliding Coulomb resultant integrates to `∫ μ p dA = μ Q`.
+    #[must_use]
+    pub fn load(&self) -> f64 {
+        2.0 / 3.0 * core::f64::consts::PI * self.semi_axis_x * self.semi_axis_y * self.peak_pressure
+    }
+
+    /// Pressure at flank-local `(x, y)`: `p0 √⌊1 − (x/a_x)² − (y/a_y)²⌋₊`, and `0`
+    /// outside the contact ellipse (or anywhere, for a lifted-off flank).
+    #[must_use]
+    pub fn pressure_at(&self, x: f64, y: f64) -> f64 {
+        if self.peak_pressure <= 0.0 {
+            return 0.0;
+        }
+        let rx = x / self.semi_axis_x;
+        let ry = y / self.semi_axis_y;
+        let radial = rx * rx + ry * ry;
+        if radial >= 1.0 {
+            0.0
+        } else {
+            self.peak_pressure * (1.0 - radial).sqrt()
+        }
+    }
+
+    /// The Coulomb traction bound `μ p(x, y)` at flank-local `(x, y)` (pascals).
+    ///
+    /// The cap a tangential-contact model rides under: the local friction stress
+    /// cannot exceed it, and integrating it over the footprint gives `μ Q`.
+    ///
+    /// # Panics
+    /// Panics if `mu` is negative or not finite.
+    #[must_use]
+    pub fn traction_bound(&self, mu: f64, x: f64, y: f64) -> f64 {
+        assert!(
+            mu >= 0.0 && mu.is_finite(),
+            "friction coefficient must be non-negative and finite",
+        );
+        mu * self.pressure_at(x, y)
     }
 }
 
@@ -855,5 +1028,172 @@ mod tests {
     #[should_panic(expected = "flank offset")]
     fn with_flank_coupling_rejects_a_non_positive_offset() {
         let _ = sample_law().with_flank_coupling(COUPLED_E_STAR, 0.0);
+    }
+
+    // --- per-flank pressure: the Coulomb-friction cap ---------------------- #
+
+    #[test]
+    fn flank_pressure_reproduces_the_elliptic_hertz_footprint() {
+        // The lightweight cube-root scaling must reproduce, to machine precision, a
+        // fresh elliptic-Hertz solve at the flank load — the same closed form the
+        // gallery validates the field solver against. Check peak, semi-axes and the
+        // pressure field at an interior point, at two unrelated loads.
+        let (radius_x, radius_y, e_star) = (1.6e-3, 26.0e-3, 100.0e9);
+        let law = GothicArchLaw::from_elliptic_flank(radius_x, radius_y, e_star, 0.40);
+
+        for &load in &[12.0_f64, 540.0] {
+            let footprint = law
+                .flank_pressure(load)
+                .expect("calibrated law has a footprint");
+            let hertz = HertzElliptic::new(radius_x, radius_y, load, e_star);
+            let (a_x, a_y) = footprint.semi_axes();
+            assert_close(a_x, hertz.semi_axis_x(), 1.0e-12, "footprint semi-axis x");
+            assert_close(a_y, hertz.semi_axis_y(), 1.0e-12, "footprint semi-axis y");
+            assert_close(
+                footprint.peak_pressure(),
+                hertz.max_pressure(),
+                1.0e-12,
+                "footprint peak pressure",
+            );
+            assert_close(
+                footprint.pressure_at(0.3 * a_x, 0.2 * a_y),
+                hertz.pressure_at(0.3 * a_x, 0.2 * a_y),
+                1.0e-12,
+                "footprint pressure field",
+            );
+        }
+    }
+
+    #[test]
+    fn flank_pressure_integrates_to_the_load() {
+        // The half-ellipsoid carries exactly the load it was built from, so the
+        // full-sliding Coulomb resultant is μ Q: both the closed form (2/3)π a_x a_y p0
+        // and a direct quadrature of the footprint recover Q.
+        let law = sample_law();
+        let load = 130.0;
+        let footprint = law
+            .flank_pressure(load)
+            .expect("calibrated law has a footprint");
+        assert_close(footprint.load(), load, 1.0e-12, "closed-form integral");
+
+        let (a_x, a_y) = footprint.semi_axes();
+        let n: u32 = 400; // f64::from(u32) is lossless, so the quadrature is clippy-clean
+        let (dx, dy) = (2.0 * a_x / f64::from(n), 2.0 * a_y / f64::from(n));
+        let mut sum = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                let x = (f64::from(i) + 0.5) * dx - a_x;
+                let y = (f64::from(j) + 0.5) * dy - a_y;
+                sum += footprint.pressure_at(x, y);
+            }
+        }
+        assert_close(sum * dx * dy, load, 1.0e-3, "quadrature integral");
+    }
+
+    #[test]
+    fn flank_pressure_is_a_half_ellipsoid() {
+        // The footprint peaks at the centre, vanishes on the contact ellipse, is zero
+        // outside it, and is symmetric in both axes — the Hertzian half-ellipsoid.
+        let footprint = sample_law()
+            .flank_pressure(200.0)
+            .expect("calibrated law has a footprint");
+        let (a_x, a_y) = footprint.semi_axes();
+        let p0 = footprint.peak_pressure();
+
+        assert_close(footprint.pressure_at(0.0, 0.0), p0, 1.0e-12, "centre is p0");
+        assert!(
+            footprint.pressure_at(a_x, 0.0).abs() <= 1.0e-9 * p0,
+            "zero on the x rim"
+        );
+        assert!(
+            footprint.pressure_at(0.0, a_y).abs() <= 1.0e-9 * p0,
+            "zero on the y rim"
+        );
+        assert!(footprint.pressure_at(1.1 * a_x, 0.0) == 0.0, "zero outside");
+        assert_close(
+            footprint.pressure_at(0.4 * a_x, -0.3 * a_y),
+            footprint.pressure_at(-0.4 * a_x, 0.3 * a_y),
+            1.0e-12,
+            "symmetric half-ellipsoid",
+        );
+        assert_close(
+            footprint.mean_pressure(),
+            2.0 / 3.0 * p0,
+            1.0e-12,
+            "mean pressure is 2/3 p0",
+        );
+    }
+
+    #[test]
+    fn flank_pressure_peak_scales_as_the_square_root_of_approach() {
+        // Q = K s^{3/2} and p0 = c_p Q^{1/3} give p0 = c_p K^{1/3} √s: the cap kisses
+        // zero as √s at lift-off, the same 3/2-power signature behind the C¹ force.
+        let law = sample_law();
+        let (s_lo, s_hi) = (2.0e-6, 8.0e-6);
+        let p_lo = law
+            .flank_pressure(law.flank_load(s_lo))
+            .expect("footprint")
+            .peak_pressure();
+        let p_hi = law
+            .flank_pressure(law.flank_load(s_hi))
+            .expect("footprint")
+            .peak_pressure();
+        assert_close(p_hi / p_lo, (s_hi / s_lo).sqrt(), 1.0e-12, "p0 ∝ √s");
+    }
+
+    #[test]
+    fn traction_bound_is_mu_times_the_pressure() {
+        // The Coulomb cap is just μ p, so it integrates to μ Q over the footprint.
+        let footprint = sample_law()
+            .flank_pressure(75.0)
+            .expect("calibrated law has a footprint");
+        let (a_x, a_y) = footprint.semi_axes();
+        let mu = 0.12;
+        assert_close(
+            footprint.traction_bound(mu, 0.25 * a_x, 0.15 * a_y),
+            mu * footprint.pressure_at(0.25 * a_x, 0.15 * a_y),
+            1.0e-12,
+            "traction bound is μ p",
+        );
+        // A zero friction coefficient caps the traction at zero everywhere.
+        assert!(
+            footprint.traction_bound(0.0, 0.0, 0.0) == 0.0,
+            "μ = 0 caps at zero"
+        );
+    }
+
+    #[test]
+    fn a_lifted_off_flank_has_a_zero_pressure_cap() {
+        // A non-positive load is a separated flank: the footprint is degenerate and
+        // caps the traction at zero everywhere, so it composes with the C¹ lift-off.
+        let footprint = sample_law()
+            .flank_pressure(0.0)
+            .expect("a zero load still yields a (zero) footprint");
+        assert!(footprint.peak_pressure() == 0.0, "zero peak");
+        assert!(footprint.semi_axes() == (0.0, 0.0), "zero footprint");
+        assert!(footprint.pressure_at(0.0, 0.0) == 0.0, "zero pressure");
+        assert!(footprint.load() == 0.0, "carries no load");
+    }
+
+    #[test]
+    fn a_bare_law_has_no_pressure_footprint() {
+        // The stiffness alone does not fix the contact-ellipse shape, so the bare
+        // constructor cannot produce a pressure footprint — only the calibrating one.
+        let bare = GothicArchLaw::new(1.0e9, 0.40);
+        assert!(
+            bare.flank_pressure(100.0).is_none(),
+            "bare law has no footprint"
+        );
+        assert!(
+            sample_law().flank_pressure(100.0).is_some(),
+            "the calibrated law has one",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "friction coefficient")]
+    fn traction_bound_rejects_a_negative_friction_coefficient() {
+        let footprint = sample_law().flank_pressure(50.0).expect("footprint");
+        let _ = footprint.traction_bound(-0.1, 0.0, 0.0);
     }
 }

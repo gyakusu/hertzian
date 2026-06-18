@@ -746,6 +746,82 @@ mod tests {
     }
 
     #[test]
+    fn gothic_flank_pressure_caps_the_field_solver() {
+        // The per-flank pressure footprint is the Coulomb-friction cap the reduced
+        // law hands a tangential-contact model (|τ| ≤ μ p). In the separated regime
+        // each flank is a half-load elliptic-Hertz patch, so the footprint built from
+        // the per-flank load must reproduce what the field solver finds — its peak
+        // pressure and circumferential half-width — and it integrates to that load
+        // exactly. (Where the patches overlap they merge into one connected contact
+        // whose seam is not the sum of the two half-ellipsoids; the deferred stage.)
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 60.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 40_000,
+        };
+
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let law = GothicArchLaw::from_elliptic_flank(
+            radii.radius_x(),
+            radii.radius_y(),
+            material.e_star(),
+            0.4,
+        );
+
+        // Two well-separated flanks, each carrying half the load.
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let y0 = 2.0 * flank.semi_axis_y(); // well separated: two distinct patches
+        let centre_offset = y0 * (tube - ball) / ball;
+        let split = sphere_in_gothic_arch(
+            ball,
+            GothicArchGroove::new(tube, centre_radius, centre_offset),
+            load,
+            material,
+            gothic_grid(&flank, y0),
+            config,
+        );
+        assert!(
+            split.diagnostics().converged,
+            "split contact did not converge"
+        );
+
+        // The footprint from the per-flank load reproduces the solver's peak pressure
+        // (the cap the contact rides under) and its circumferential half-width...
+        let footprint = law
+            .flank_pressure(split.total_load() / 2.0)
+            .expect("the calibrated law has a footprint");
+        assert_relative(
+            footprint.peak_pressure(),
+            split.max_pressure(),
+            0.03,
+            "flank cap peak vs solver",
+        );
+        let (a_x, _) = footprint.semi_axes();
+        assert_relative(
+            a_x,
+            split.contact_half_widths().0,
+            0.05,
+            "flank cap circumferential half-width vs solver",
+        );
+        // ...and it carries exactly the load it was built from, so ∫ μ p dA = μ Q.
+        assert_relative(
+            footprint.load(),
+            split.total_load() / 2.0,
+            1.0e-9,
+            "footprint integrates to the flank load",
+        );
+    }
+
+    #[test]
     fn gothic_overlap_shifts_the_load_centroid_outboard() {
         // The second-order directional signature: the flank *normal* rotates as the
         // contacts overlap. Each flank lifts the inboard side of its neighbour more

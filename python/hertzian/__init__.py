@@ -14,7 +14,9 @@ Three layers are offered (design §8.5):
 * A **reduced force law**, :class:`GothicArchLaw`, distilling the two-flank
   Gothic-arch contact into a lightweight ``force(delta_t, delta_n)`` map for
   multibody inner loops -- ``C¹`` across the two-to-one flank transition and
-  reducing to the single Hertz contact (see :func:`contact_half_angle`).
+  reducing to the single Hertz contact (see :func:`contact_half_angle`). Its
+  ``flank_pressure(load)`` returns the per-flank :class:`FlankPressure` footprint,
+  the Coulomb-friction cap ``|tau| <= mu p`` a tangential model rides under.
 
 The solver layers return a :class:`Solution` carrying the converged pressure field
 (as a zero-copy NumPy array) and the derived contact quantities.
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 from hertzian._core import (
     Diagnostics,
+    FlankPressure,
     GothicArchLaw,
     Solution,
     __version__,
@@ -45,6 +48,7 @@ from hertzian._core import (
 
 __all__ = [
     "Diagnostics",
+    "FlankPressure",
     "GothicArchLaw",
     "Solution",
     "__version__",
