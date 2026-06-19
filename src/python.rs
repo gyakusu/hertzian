@@ -28,7 +28,7 @@ use crate::grid::Grid;
 use crate::material::Material;
 use crate::reduced::{
     contact_half_angle as core_contact_half_angle, FlankPressure as CoreFlankPressure,
-    GothicArchLaw as CoreLaw,
+    GothicArchLaw as CoreLaw, GrooveContactPressure as CoreGroovePressure,
 };
 use crate::scenarios::{
     solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat, sphere_on_sphere, sphere_on_torus,
@@ -46,6 +46,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Diagnostics>()?;
     module.add_class::<GothicArchLaw>()?;
     module.add_class::<FlankPressure>()?;
+    module.add_class::<GrooveContactPressure>()?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_flat, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_sphere, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_torus, module)?)?;
@@ -330,6 +331,34 @@ impl GothicArchLaw {
             })
     }
 
+    /// The connected two-flank groove contact cap — the envelope of two footprints.
+    ///
+    /// Composes the per-flank footprints at `load_plus`, `load_minus` (the coupled
+    /// loads from [`coupled_loads`](Self::coupled_loads) / [`flank_loads`](Self::flank_loads)),
+    /// centred at `y = ±offset`, into the [`GrooveContactPressure`] envelope — the
+    /// pointwise maximum, the dual of the groove gap's pointwise minimum. Exact where
+    /// the footprints are disjoint (the separated regime, where it equals their sum)
+    /// and free of the seam double-count where they overlap. Raises ``ValueError`` for
+    /// the bare constructor (no calibrated shape) and for a negative `offset`.
+    #[pyo3(signature = (load_plus, load_minus, *, offset))]
+    fn groove_pressure(
+        &self,
+        load_plus: f64,
+        load_minus: f64,
+        offset: f64,
+    ) -> PyResult<GrooveContactPressure> {
+        require_non_negative(offset, "offset")?;
+        self.inner
+            .groove_pressure(load_plus, load_minus, offset)
+            .map(|inner| GrooveContactPressure { inner })
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "groove_pressure requires a shape-calibrated law; build it with \
+                     GothicArchLaw.from_elliptic_flank",
+                )
+            })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "GothicArchLaw(stiffness={:.6e}, contact_angle={:.6e}, coupling={:.6e})",
@@ -399,6 +428,77 @@ impl FlankPressure {
         format!(
             "FlankPressure(peak_pressure={:.6e}, semi_axes=({a_x:.6e}, {a_y:.6e}))",
             self.inner.peak_pressure(),
+        )
+    }
+}
+
+/// The connected two-flank groove contact cap — the envelope of two footprints.
+///
+/// The whole-groove cap a Coulomb model rides under (`|τ| ≤ μ p`) for a ball in a
+/// Gothic-arch groove: the pointwise *maximum* of the two per-flank half-ellipsoids
+/// centred at `y = ±y0`, the dual of the groove gap's pointwise-minimum construction.
+/// Built by [`GothicArchLaw.groove_pressure`]. Identical to summing the two flanks
+/// where their footprints are disjoint (the separated regime), and free of the seam
+/// double-count where they overlap. Immutable from Python.
+#[pyclass(name = "GrooveContactPressure", module = "hertzian._core", frozen)]
+struct GrooveContactPressure {
+    inner: CoreGroovePressure,
+}
+
+#[pymethods]
+impl GrooveContactPressure {
+    /// Peak contact pressure `p0 = max(p0_+, p0_-)` (pascals) — the dominant crest.
+    #[getter]
+    const fn peak_pressure(&self) -> f64 {
+        self.inner.peak_pressure()
+    }
+
+    /// The meridional flank offset `y0` (metres); the flank centres sit at `±y0`.
+    #[getter]
+    const fn offset(&self) -> f64 {
+        self.inner.offset()
+    }
+
+    /// Whether the two flank footprints are disjoint (the separated regime).
+    ///
+    /// ``True`` when `2 y0 ≥ a_y^+ + a_y^-`, where the envelope equals the per-flank
+    /// sum exactly; ``False`` in the overlap, where it drops the seam double-count.
+    #[getter]
+    fn separated(&self) -> bool {
+        self.inner.separated()
+    }
+
+    /// The two per-flank footprints `(upper, lower)`, centred at `y = ±offset`.
+    ///
+    /// Each carries its (coupled) load exactly, so the full-sliding friction
+    /// resultant is `μ (Q_+ + Q_-)` from their ``load``s — the envelope is the
+    /// *local* cap, the per-flank loads the *resultant*.
+    #[getter]
+    const fn flanks(&self) -> (FlankPressure, FlankPressure) {
+        let (upper, lower) = self.inner.flanks();
+        (
+            FlankPressure { inner: upper },
+            FlankPressure { inner: lower },
+        )
+    }
+
+    /// Pressure at groove-local `(x, y)`: `max(p_+(x, y−y0), p_-(x, y+y0))` (pascals).
+    fn pressure_at(&self, x: f64, y: f64) -> f64 {
+        self.inner.pressure_at(x, y)
+    }
+
+    /// The Coulomb traction bound `μ p(x, y)` at groove-local `(x, y)` (pascals).
+    fn traction_bound(&self, mu: f64, x: f64, y: f64) -> PyResult<f64> {
+        require_non_negative(mu, "mu")?;
+        Ok(self.inner.traction_bound(mu, x, y))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "GrooveContactPressure(peak_pressure={:.6e}, offset={:.6e}, separated={})",
+            self.inner.peak_pressure(),
+            self.inner.offset(),
+            py_bool(self.inner.separated()),
         )
     }
 }

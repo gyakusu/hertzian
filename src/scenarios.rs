@@ -822,6 +822,94 @@ mod tests {
     }
 
     #[test]
+    fn gothic_groove_pressure_envelope_caps_the_overlap() {
+        // The whole-groove Coulomb cap is the *envelope* (pointwise max) of the two
+        // per-flank footprints — the dual of the gap's pointwise-min construction.
+        // Where the separated test above resolves the two patches, here the arc-centre
+        // shim is tightened to a half overlap (y0 = b/2), the regime the naive *sum*
+        // of the two half-ellipsoids gets wrong: it double-counts the crossing
+        // footprints into an unphysical seam spike. The envelope drops that
+        // double-count — its peak tracks the field solver to a few percent (the sum
+        // overshoots by ~70%), and it recovers the connected saddle the solver finds.
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 120.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 40_000,
+        };
+
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let flank = HertzElliptic::new(
+            radii.radius_x(),
+            radii.radius_y(),
+            load / 2.0,
+            material.e_star(),
+        );
+        let b = flank.semi_axis_y();
+        let ax = flank.semi_axis_x();
+
+        // Half overlap: flank centres one meridional semi-axis apart (y0 = b/2).
+        let y0 = 0.5 * b;
+        let centre_offset = y0 * (tube - ball) / ball;
+        let groove = GothicArchGroove::new(tube, centre_radius, centre_offset);
+
+        let dx = ax / 8.0;
+        let dy = b / 12.0;
+        let nx = even_ceil(2.0 * 2.5 * ax / dx);
+        let ny = even_ceil(2.0 * (y0 + 2.5 * b) / dy);
+        let grid = Grid::new(nx, ny, dx, dy);
+        let sol = sphere_in_gothic_arch(ball, groove, load, material, grid, config);
+        assert!(sol.diagnostics().converged, "solver did not converge");
+
+        // Build the envelope cap from the coupled flank loads at the solver's approach.
+        let law = GothicArchLaw::from_elliptic_flank(
+            radii.radius_x(),
+            radii.radius_y(),
+            material.e_star(),
+            0.4,
+        )
+        .with_flank_coupling(material.e_star(), y0);
+        let (q_plus, q_minus) = law.coupled_loads(sol.approach(), sol.approach());
+        let groove_cap = law
+            .groove_pressure(q_plus, q_minus, y0)
+            .expect("the calibrated law has a footprint");
+        assert!(
+            !groove_cap.separated(),
+            "the footprints must overlap at y0 = b/2",
+        );
+
+        // The envelope peak tracks the solver to a few percent...
+        let solver_peak = sol.max_pressure();
+        assert_relative(
+            groove_cap.peak_pressure(),
+            solver_peak,
+            0.07,
+            "envelope peak vs solver",
+        );
+
+        // ...whereas the naive sum double-counts the seam into a spike well above it.
+        let (cap_plus, cap_minus) = groove_cap.flanks();
+        let sum_seam = cap_plus.pressure_at(0.0, -y0) + cap_minus.pressure_at(0.0, y0);
+        assert!(
+            sum_seam > 1.3 * solver_peak,
+            "the naive sum must over-count the seam (sum {sum_seam:e} vs solver {solver_peak:e})",
+        );
+
+        // The envelope is the connected saddle the solver finds: the seam carries
+        // load (a connected patch, not the separated arch's contact-free ridge) but
+        // stays below the flank crest.
+        let seam = groove_cap.pressure_at(0.0, 0.0);
+        let crest = groove_cap.peak_pressure();
+        assert!(
+            seam > 0.4 * crest && seam < crest,
+            "connected saddle: seam {seam:e} vs crest {crest:e}",
+        );
+    }
+
+    #[test]
     fn gothic_overlap_shifts_the_load_centroid_outboard() {
         // The second-order directional signature: the flank *normal* rotates as the
         // contacts overlap. Each flank lifts the inboard side of its neighbour more

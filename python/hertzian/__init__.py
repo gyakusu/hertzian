@@ -16,7 +16,9 @@ Three layers are offered (design §8.5):
   multibody inner loops -- ``C¹`` across the two-to-one flank transition and
   reducing to the single Hertz contact (see :func:`contact_half_angle`). Its
   ``flank_pressure(load)`` returns the per-flank :class:`FlankPressure` footprint,
-  the Coulomb-friction cap ``|tau| <= mu p`` a tangential model rides under.
+  and ``groove_pressure(...)`` the whole-groove :class:`GrooveContactPressure`
+  envelope of both flanks -- the Coulomb-friction cap ``|tau| <= mu p`` a tangential
+  model rides under.
 
 The solver layers return a :class:`Solution` carrying the converged pressure field
 (as a zero-copy NumPy array) and the derived contact quantities.
@@ -36,6 +38,7 @@ from hertzian._core import (
     Diagnostics,
     FlankPressure,
     GothicArchLaw,
+    GrooveContactPressure,
     Solution,
     __version__,
     contact_half_angle,
@@ -50,6 +53,7 @@ __all__ = [
     "Diagnostics",
     "FlankPressure",
     "GothicArchLaw",
+    "GrooveContactPressure",
     "Solution",
     "__version__",
     "contact_half_angle",

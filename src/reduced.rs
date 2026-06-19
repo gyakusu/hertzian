@@ -127,12 +127,39 @@
 //! force `C¹` there. The half-ellipsoid integrates to `Q` exactly, so the full-sliding
 //! friction resultant is `∫ μ p dA = μ Q` per flank.
 //!
-//! This is exact, per flank, where the two footprints are *resolved* as distinct
-//! patches — the separated regime, the common two-flank bearing the section is built
-//! around. As the shim closes to half overlap the patches merge into one connected
-//! contact whose seam is *not* the sum of the two half-ellipsoids (superposing them
-//! double-counts the overlap); that single-patch coalescence is the same next stage
-//! as the `η → 1` blend onto the single arch.
+//! # Composing the two flanks: the envelope, not the sum
+//!
+//! A multibody contact needs the cap of the *whole* groove contact, both flanks at
+//! once. Summing the two half-ellipsoids ([`FlankPressure::pressure_at`] at `±y0`) is
+//! exact only while the footprints are *disjoint* — the separated regime, where at
+//! every point at most one flank is in contact. As the shim closes to a half overlap
+//! the footprints cross, and the sum **double-counts** the overlap: it stacks the two
+//! pressures into an unphysical seam spike (the peak runs ~70 % high at half overlap).
+//!
+//! The right lightweight composition is the pointwise **maximum** — the *envelope* —
+//! and it is the exact dual of how the groove gap is built. The gap is the pointwise
+//! *minimum* of the two flank wells (`h = min(well_+, well_-)`, the nearer surface
+//! wins, [`GothicArchProfile`](crate::geometry::GothicArchProfile)); correspondingly
+//! the pressure cap is the pointwise maximum of the two flank footprints, the
+//! *more-compressed* flank governing each point:
+//!
+//! ```text
+//! p(x, y) = max( p_+(x, y − y0),  p_-(x, y + y0) ).
+//! ```
+//!
+//! [`GothicArchLaw::groove_pressure`] builds this [`GrooveContactPressure`]. Where the
+//! footprints are disjoint the envelope is *identical* to the sum (so the separated
+//! regime the section validates is untouched, exactly); where they overlap it drops
+//! the double-count, recovering the field solver's saddle-joined connected patch and a
+//! peak within a few percent through the half overlap (the envelope peak is just
+//! `max(p0_+, p0_-)`, since each flank's pressure never exceeds its own crest).
+//!
+//! This is the leading-order cap. The envelope discards the overlap lens `∫ min(p_+,
+//! p_-)`, so where the patches cross its integral runs a little short of `Q_+ + Q_-`
+//! (the per-flank loads themselves stay exact, so the full-sliding resultant is still
+//! `μ (Q_+ + Q_-)` from the loads). Redistributing that lens — the single-patch
+//! coalescence onto the single arch, whose one merged contact would carry `2Q` at the
+//! deeper peak `c_p (2Q)^{1/3}` — is the same next stage as the `η → 1` blend.
 
 use crate::validation::HertzElliptic;
 
@@ -485,6 +512,44 @@ impl GothicArchLaw {
             semi_axis_y,
         })
     }
+
+    /// The connected two-flank groove contact cap for a pair of flank loads.
+    ///
+    /// Composes the two per-flank footprints — built from `load_plus` and
+    /// `load_minus` (the coupled loads from [`GothicArchLaw::coupled_loads`] /
+    /// [`GothicArchLaw::flank_loads`]) and centred at `y = ±offset` — into the
+    /// [`GrooveContactPressure`] envelope, the pointwise *maximum* of the two
+    /// half-ellipsoids (see the [module
+    /// docs](self#composing-the-two-flanks-the-envelope-not-the-sum)). This is the
+    /// cap a Coulomb model rides under for the whole groove contact, both flanks at
+    /// once: exact where the footprints are disjoint (the separated regime, where it
+    /// equals the per-flank sum) and free of the seam double-count where they
+    /// overlap.
+    ///
+    /// Returns `None` for the bare [`GothicArchLaw::new`] (no calibrated shape);
+    /// build it with [`GothicArchLaw::from_elliptic_flank`]. A non-positive load is a
+    /// lifted-off flank with a zero footprint, so a one-flank drive yields the single
+    /// surviving half-ellipsoid.
+    ///
+    /// # Panics
+    /// Panics if `offset` is negative or not finite (a flank pair sits at `±offset`).
+    #[must_use]
+    pub fn groove_pressure(
+        &self,
+        load_plus: f64,
+        load_minus: f64,
+        offset: f64,
+    ) -> Option<GrooveContactPressure> {
+        assert!(
+            offset >= 0.0 && offset.is_finite(),
+            "flank offset must be non-negative and finite",
+        );
+        Some(GrooveContactPressure {
+            upper: self.flank_pressure(load_plus)?,
+            lower: self.flank_pressure(load_minus)?,
+            offset,
+        })
+    }
 }
 
 /// One flank's elliptic-Hertz pressure footprint — the Coulomb-friction cap.
@@ -560,6 +625,106 @@ impl FlankPressure {
     ///
     /// The cap a tangential-contact model rides under: the local friction stress
     /// cannot exceed it, and integrating it over the footprint gives `μ Q`.
+    ///
+    /// # Panics
+    /// Panics if `mu` is negative or not finite.
+    #[must_use]
+    pub fn traction_bound(&self, mu: f64, x: f64, y: f64) -> f64 {
+        assert!(
+            mu >= 0.0 && mu.is_finite(),
+            "friction coefficient must be non-negative and finite",
+        );
+        mu * self.pressure_at(x, y)
+    }
+}
+
+/// The connected two-flank groove contact cap — the envelope of two footprints.
+///
+/// The whole-groove counterpart of [`FlankPressure`]: a Coulomb model on a ball in a
+/// Gothic-arch groove sees *both* flanks, so it needs the cap of the connected contact,
+/// not one flank. Built by [`GothicArchLaw::groove_pressure`] from the two (coupled)
+/// flank loads at `y = ±y0`, it is their pointwise **maximum** — the *envelope* — the
+/// dual of the groove gap's pointwise-minimum construction (the nearer well sets the
+/// gap; the more-compressed flank sets the cap, see the [module
+/// docs](self#composing-the-two-flanks-the-envelope-not-the-sum)):
+///
+/// ```text
+/// p(x, y) = max( p_+(x, y − y0),  p_-(x, y + y0) ),   |τ(x, y)| ≤ μ p(x, y).
+/// ```
+///
+/// Where the footprints are disjoint (`2 y0 ≥ a_y^+ + a_y^-`, the separated regime)
+/// this is *identical* to summing them; where they overlap it drops the sum's seam
+/// double-count, tracking the field solver's saddle-joined connected patch. Immutable;
+/// the per-flank footprints are reachable via [`GrooveContactPressure::flanks`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GrooveContactPressure {
+    /// The upper flank footprint, centred at `y = +offset`.
+    upper: FlankPressure,
+    /// The lower flank footprint, centred at `y = −offset`.
+    lower: FlankPressure,
+    /// The meridional flank offset `y0` (m): the flank centres sit at `y = ±offset`.
+    offset: f64,
+}
+
+impl GrooveContactPressure {
+    /// Peak contact pressure `p0 = max(p0_+, p0_-)` (pascals).
+    ///
+    /// The envelope's crest is the larger of the two flank peaks: a flank's pressure
+    /// never exceeds its own centre, so neither the seam nor either crest can top the
+    /// dominant flank's `p0`. For a symmetric (equal-load) groove this is just the
+    /// common flank peak; for an asymmetric drive it is the heavier flank's.
+    #[must_use]
+    pub const fn peak_pressure(&self) -> f64 {
+        self.upper.peak_pressure().max(self.lower.peak_pressure())
+    }
+
+    /// The meridional flank offset `y0` (metres); the flank centres sit at `±y0`.
+    #[must_use]
+    pub const fn offset(&self) -> f64 {
+        self.offset
+    }
+
+    /// The two per-flank footprints `(upper, lower)`, centred at `y = ±offset`.
+    ///
+    /// Each is the exact half-ellipsoid carrying its (coupled) load, so the
+    /// full-sliding friction resultant is `μ (Q_+ + Q_-)` from their
+    /// [`FlankPressure::load`]s — the envelope `pressure_at` is the *local* cap, the
+    /// per-flank loads the *resultant*.
+    #[must_use]
+    pub const fn flanks(&self) -> (FlankPressure, FlankPressure) {
+        (self.upper, self.lower)
+    }
+
+    /// Whether the two flank footprints are disjoint (the separated regime).
+    ///
+    /// True when `2 y0 ≥ a_y^+ + a_y^-`, i.e. the meridional half-extents do not
+    /// reach across the centre. There the envelope is *identical* to the per-flank
+    /// sum (at most one flank is in contact at any point), so the reduced cap is
+    /// exact; below it the patches overlap and the envelope drops the seam
+    /// double-count the sum would make.
+    #[must_use]
+    pub fn separated(&self) -> bool {
+        let (_, a_y_upper) = self.upper.semi_axes();
+        let (_, a_y_lower) = self.lower.semi_axes();
+        2.0 * self.offset >= a_y_upper + a_y_lower
+    }
+
+    /// Pressure at groove-local `(x, y)`: the envelope `max(p_+(x, y−y0), p_-(x, y+y0))`.
+    ///
+    /// Each flank footprint is evaluated about its own centre `±y0` and the larger
+    /// taken — the more-compressed flank governs the point. Zero outside both contact
+    /// ellipses (and everywhere for a fully lifted-off pair).
+    #[must_use]
+    pub fn pressure_at(&self, x: f64, y: f64) -> f64 {
+        let upper = self.upper.pressure_at(x, y - self.offset);
+        let lower = self.lower.pressure_at(x, y + self.offset);
+        upper.max(lower)
+    }
+
+    /// The Coulomb traction bound `μ p(x, y)` at groove-local `(x, y)` (pascals).
+    ///
+    /// The cap the local friction stress cannot exceed across the whole groove
+    /// contact: `μ` times the envelope [`GrooveContactPressure::pressure_at`].
     ///
     /// # Panics
     /// Panics if `mu` is negative or not finite.
@@ -1195,5 +1360,170 @@ mod tests {
     fn traction_bound_rejects_a_negative_friction_coefficient() {
         let footprint = sample_law().flank_pressure(50.0).expect("footprint");
         let _ = footprint.traction_bound(-0.1, 0.0, 0.0);
+    }
+
+    // --- two-flank groove cap: the envelope, not the sum ------------------- #
+
+    #[test]
+    fn groove_pressure_envelope_equals_the_sum_when_separated() {
+        // Where the two footprints are disjoint the envelope (pointwise max) is
+        // identical to summing them: at most one flank is in contact at any point.
+        // This keeps the validated separated regime exact, bit for bit.
+        let law = sample_law();
+        let load = 120.0;
+        let cap = law.flank_pressure(load).expect("footprint");
+        let (a_x, a_y) = cap.semi_axes();
+        let offset = 1.2 * a_y; // 2·offset = 2.4 a_y > a_y + a_y: disjoint
+        let groove = law
+            .groove_pressure(load, load, offset)
+            .expect("calibrated law has a footprint");
+        assert!(groove.separated(), "offset must separate the footprints");
+
+        for i in -6..=6 {
+            for j in -20..=20 {
+                let x = f64::from(i) / 6.0 * 1.5 * a_x;
+                let y = f64::from(j) / 20.0 * (offset + 1.5 * a_y);
+                let envelope = groove.pressure_at(x, y);
+                let sum = cap.pressure_at(x, y - offset) + cap.pressure_at(x, y + offset);
+                assert_close(envelope, sum, 1.0e-12, "envelope equals sum when separated");
+            }
+        }
+    }
+
+    #[test]
+    fn groove_pressure_drops_the_seam_double_count_in_overlap() {
+        // At a half overlap the footprints cross. The naive sum stacks them into a
+        // seam spike; the envelope drops the double-count, so the seam carries load
+        // but stays *below* the flank crests — a saddle, the connected patch the
+        // field solver finds, not one merged peak.
+        let law = sample_law();
+        let load = 120.0;
+        let cap = law.flank_pressure(load).expect("footprint");
+        let (_, a_y) = cap.semi_axes();
+        let offset = 0.5 * a_y; // half overlap: the footprints cross
+        let groove = law
+            .groove_pressure(load, load, offset)
+            .expect("calibrated law has a footprint");
+        assert!(!groove.separated(), "offset must overlap the footprints");
+
+        // The peak is the flank crest, and it sits at the flank centre y = +offset.
+        let peak = groove.peak_pressure();
+        assert_close(
+            peak,
+            cap.peak_pressure(),
+            1.0e-12,
+            "envelope peak is the flank crest",
+        );
+        assert_close(
+            groove.pressure_at(0.0, offset),
+            peak,
+            1.0e-12,
+            "peak sits at the flank centre",
+        );
+
+        // The seam is a loaded saddle: positive, below the crest, and exactly one
+        // flank's value — half the double-counting sum.
+        let seam = groove.pressure_at(0.0, 0.0);
+        let sum_seam = cap.pressure_at(0.0, -offset) + cap.pressure_at(0.0, offset);
+        assert!(
+            seam > 0.0 && seam < peak,
+            "seam is a loaded saddle: {seam:e} vs {peak:e}"
+        );
+        assert_close(
+            seam,
+            0.5 * sum_seam,
+            1.0e-12,
+            "envelope halves the seam double-count",
+        );
+    }
+
+    #[test]
+    fn groove_pressure_peak_is_the_dominant_flank_crest() {
+        // Under an asymmetric drive the envelope crest is the heavier flank's peak,
+        // independent of the offset (a flank never tops its own centre).
+        let law = sample_law();
+        let groove = law
+            .groove_pressure(200.0, 80.0, 0.4e-3)
+            .expect("calibrated law has a footprint");
+        let heavier = law.flank_pressure(200.0).expect("footprint");
+        assert_close(
+            groove.peak_pressure(),
+            heavier.peak_pressure(),
+            1.0e-12,
+            "peak is the heavier flank crest",
+        );
+    }
+
+    #[test]
+    fn groove_pressure_reduces_to_one_flank_when_the_other_lifts_off() {
+        // A one-flank drive (the other lifted off at zero load) collapses the
+        // envelope to the single surviving half-ellipsoid, composing with the C¹
+        // lift-off the force law already has.
+        let law = sample_law();
+        let load = 90.0;
+        let offset = 0.3e-3;
+        let groove = law
+            .groove_pressure(load, 0.0, offset)
+            .expect("calibrated law has a footprint");
+        let cap = law.flank_pressure(load).expect("footprint");
+        let (_, lower) = groove.flanks();
+
+        assert!(
+            lower.peak_pressure() == 0.0,
+            "lifted-off flank has a zero cap"
+        );
+        assert_close(
+            groove.pressure_at(0.0, offset),
+            cap.peak_pressure(),
+            1.0e-12,
+            "live flank crest survives",
+        );
+        assert!(
+            groove.pressure_at(0.0, -offset) == 0.0,
+            "the lifted flank carries nothing",
+        );
+        assert_close(
+            groove.peak_pressure(),
+            cap.peak_pressure(),
+            1.0e-12,
+            "peak is the live flank",
+        );
+    }
+
+    #[test]
+    fn groove_pressure_traction_bound_is_mu_times_the_envelope() {
+        // The whole-groove Coulomb cap is μ times the envelope pressure.
+        let law = sample_law();
+        let groove = law
+            .groove_pressure(100.0, 60.0, 0.4e-3)
+            .expect("calibrated law has a footprint");
+        let mu = 0.1;
+        let (x, y) = (0.05e-3, 0.1e-3);
+        assert_close(
+            groove.traction_bound(mu, x, y),
+            mu * groove.pressure_at(x, y),
+            1.0e-12,
+            "groove traction bound is μ p",
+        );
+        assert!(
+            groove.traction_bound(0.0, 0.0, 0.0) == 0.0,
+            "μ = 0 caps at zero",
+        );
+    }
+
+    #[test]
+    fn a_bare_law_has_no_groove_pressure() {
+        // Like the per-flank footprint, the envelope needs the calibrated shape.
+        let bare = GothicArchLaw::new(1.0e9, 0.40);
+        assert!(
+            bare.groove_pressure(100.0, 100.0, 0.4e-3).is_none(),
+            "bare law has no groove footprint",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "flank offset")]
+    fn groove_pressure_rejects_a_negative_offset() {
+        let _ = sample_law().groove_pressure(100.0, 100.0, -1.0e-3);
     }
 }
