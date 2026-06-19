@@ -299,3 +299,84 @@ def test_flank_pressure_requires_a_calibrated_shape() -> None:
         hertzian.GothicArchLaw(stiffness=1.0e9, contact_angle=0.4).flank_pressure(100.0)
     with pytest.raises(ValueError, match="mu"):
         _law().flank_pressure(100.0).traction_bound(-0.1, 0.0, 0.0)
+
+
+# --- two-flank groove cap: the envelope, not the sum -------------------------
+
+
+def test_groove_pressure_envelope_equals_the_sum_when_separated() -> None:
+    """Where the footprints are disjoint the envelope is identical to summing them."""
+    law = _law()
+    load = 120.0
+    cap = law.flank_pressure(load)
+    a_x, a_y = cap.semi_axes
+    offset = 1.2 * a_y  # 2*offset > a_y + a_y: disjoint
+    groove = law.groove_pressure(load, load, offset=offset)
+    assert groove.separated
+
+    xs = np.linspace(-1.5 * a_x, 1.5 * a_x, 7)
+    ys = np.linspace(-(offset + 1.5 * a_y), offset + 1.5 * a_y, 41)
+    for x in xs:
+        for y in ys:
+            envelope = groove.pressure_at(float(x), float(y))
+            naive_sum = cap.pressure_at(float(x), float(y) - offset) + cap.pressure_at(
+                float(x), float(y) + offset
+            )
+            assert math.isclose(envelope, naive_sum, rel_tol=EXACT_RTOL, abs_tol=ZERO_TOL)
+
+
+def test_groove_pressure_drops_the_seam_double_count_in_overlap() -> None:
+    """At a half overlap the envelope is a saddle, below the double-counting sum."""
+    law = _law()
+    load = 120.0
+    cap = law.flank_pressure(load)
+    _, a_y = cap.semi_axes
+    offset = 0.5 * a_y  # half overlap: the footprints cross
+    groove = law.groove_pressure(load, load, offset=offset)
+    assert not groove.separated
+
+    peak = groove.peak_pressure
+    assert math.isclose(peak, cap.peak_pressure, rel_tol=EXACT_RTOL)
+    assert math.isclose(groove.pressure_at(0.0, offset), peak, rel_tol=EXACT_RTOL)
+
+    seam = groove.pressure_at(0.0, 0.0)
+    sum_seam = cap.pressure_at(0.0, -offset) + cap.pressure_at(0.0, offset)
+    assert 0.0 < seam < peak  # a loaded saddle, not a spike
+    assert math.isclose(seam, 0.5 * sum_seam, rel_tol=EXACT_RTOL)
+
+
+def test_groove_pressure_resultant_is_the_sum_of_the_flank_loads() -> None:
+    """The per-flank footprints carry their loads exactly: ∫ μ p dA = μ (Q_+ + Q_-)."""
+    law = _coupled_law()
+    q_plus, q_minus = law.coupled_loads(8.0e-6, 4.0e-6)
+    groove = law.groove_pressure(q_plus, q_minus, offset=COUPLING_OFFSET)
+    upper, lower = groove.flanks
+    assert math.isclose(upper.load, q_plus, rel_tol=EXACT_RTOL)
+    assert math.isclose(lower.load, q_minus, rel_tol=EXACT_RTOL)
+    # The heavier flank sets the crest.
+    assert math.isclose(groove.peak_pressure, upper.peak_pressure, rel_tol=EXACT_RTOL)
+
+
+def test_groove_pressure_reduces_to_one_flank_when_the_other_lifts_off() -> None:
+    """A one-flank drive collapses the envelope to the single surviving footprint."""
+    law = _law()
+    load = 90.0
+    offset = 0.3e-3
+    groove = law.groove_pressure(load, 0.0, offset=offset)
+    cap = law.flank_pressure(load)
+    _, lower = groove.flanks
+    assert lower.peak_pressure == 0.0
+    assert math.isclose(groove.pressure_at(0.0, offset), cap.peak_pressure, rel_tol=EXACT_RTOL)
+    assert groove.pressure_at(0.0, -offset) == 0.0
+
+
+def test_groove_pressure_requires_a_calibrated_shape() -> None:
+    """The bare constructor cannot build the envelope; a negative offset is rejected."""
+    with pytest.raises(ValueError, match="from_elliptic_flank"):
+        hertzian.GothicArchLaw(stiffness=1.0e9, contact_angle=0.4).groove_pressure(
+            100.0, 100.0, offset=0.4e-3
+        )
+    with pytest.raises(ValueError, match="offset"):
+        _law().groove_pressure(100.0, 100.0, offset=-1.0e-3)
+    with pytest.raises(ValueError, match="mu"):
+        _law().groove_pressure(100.0, 100.0, offset=0.4e-3).traction_bound(-0.1, 0.0, 0.0)

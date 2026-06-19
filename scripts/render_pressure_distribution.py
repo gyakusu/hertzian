@@ -9,19 +9,30 @@ By Hertz's cube-root load scaling the whole footprint follows from a once-calibr
 reference (``a ~ Q^{1/3}``, ``p0 = cp Q^{1/3}``), so ``law.flank_pressure(Q)`` builds it
 in a couple of ``cbrt``s — no eccentricity solve in the inner loop.
 
+The whole-groove cap composes the two flanks. Summing the two half-ellipsoids is exact
+only while their footprints are disjoint; once the shim closes to a half overlap the sum
+double-counts the crossing footprints into an unphysical seam spike. The right composition
+is the *envelope* — the pointwise maximum ``law.groove_pressure(...)`` — the dual of the
+groove gap's pointwise-minimum construction (the nearer well sets the gap; the
+more-compressed flank sets the cap). It is identical to the sum where the footprints are
+disjoint and drops the double-count where they overlap.
+
 Four panels, drawn from a handful of full solves:
 
 * **(A) Peak-pressure calibration.** A single-arch load sweep lands the solver peak on
   the ``p0 = cp P^{1/3}`` line; separated two-flank peaks land on ``cp (P/2)^{1/3}`` —
   each flank a half-load Hertz patch. Pins the cube-root pressure scaling.
-* **(B) The cap vs the solver (separated).** The reconstructed per-flank half-ellipsoids
-  (from the coupled loads) land on the solver's meridional cut; the shaded area is the
-  Coulomb cap ``mu p`` a friction model rides under.
-* **(C) The 2-D Coulomb traction cap.** ``mu p(x, y)`` over the two flank ellipses, with
-  the solver's contact outline — the bound a tangential model integrates to ``mu Q``.
-* **(D) Validity.** Reconstructed vs solver peak as the shim closes: exact where the two
-  footprints are *resolved* (``y0 >~ ay``), with naive superposition over-counting the
-  seam once they merge — the single-patch coalescence left to the next stage.
+* **(B) Half overlap — exact vs lightweight.** The meridional cut at ``y0 = b/2``: the
+  solver (exact), the naive *sum* (a seam spike, ~70% high) and the *envelope* (the
+  connected saddle, within a few % of the solver). The shaded area is the Coulomb cap
+  ``mu p`` a friction model rides under.
+* **(C) The 2-D Coulomb traction cap.** ``mu p(x, y)`` over the two (separated) flank
+  ellipses, with the solver's contact outline — the bound a tangential model integrates
+  to ``mu Q``.
+* **(D) Validity.** Envelope vs naive-sum peak against the solver as the shim closes: both
+  exact where the footprints are *resolved* (``y0 >~ b``); in the overlap the sum
+  over-counts the seam while the envelope tracks the solver, down to the deep merge left
+  to the next stage.
 
 Run it (matplotlib is a render-only dependency, kept out of the locked env):
 
@@ -61,6 +72,7 @@ EPS = 2.220_446_049_250_313e-16
 SOLVER_COLOUR = "#ef6c00"
 REFERENCE_COLOUR = "#26c6da"
 LAW_COLOUR = "#6a1b9a"
+SUM_COLOUR = "#c62828"
 
 # The applied example: the README's conformal Gothic-arch bearing groove.
 BALL = 4.0e-3
@@ -158,6 +170,10 @@ LAW = hertzian.GothicArchLaw.from_elliptic_flank(
 )
 # Pressure scaling coefficient: p0 = CP * Q^{1/3} (the unit-load elliptic-Hertz peak).
 CP = elliptic_hertz(RADIUS_X, RADIUS_Y, 1.0, E_STAR)[2]
+# The overlap scale b: the meridional semi-axis of one isolated half-load flank. The
+# half overlap is the shim that sets the flank offset y0 = b/2.
+B = elliptic_hertz(RADIUS_X, RADIUS_Y, LOAD / 2.0, E_STAR)[1]
+OVERLAP_SHIM = 0.5 * B * (TUBE - BALL) / BALL  # -> y0 = b/2
 
 
 def _even(value: float) -> int:
@@ -191,6 +207,30 @@ def solve_groove(
         max_iter=SOLVE_MAX_ITER,
     )
     return sol, y0, dx, dy
+
+
+def reconstruct_cuts(
+    sol: object, y0: float, y: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64], hertzian.GrooveContactPressure]:
+    """Return ``(naive_sum_cut, envelope_cut, groove_cap)`` along a meridional cut.
+
+    Both reconstructions use the coupled per-flank loads at the solver's approach; the
+    sum stacks the two half-ellipsoids (double-counting the overlap), the envelope takes
+    their pointwise maximum (``groove_pressure``).
+    """
+    delta = sol.approach
+    law = LAW.with_flank_coupling(e_star=E_STAR, offset=y0)
+    q_plus, q_minus = law.coupled_loads(delta, delta)
+    groove = law.groove_pressure(q_plus, q_minus, offset=y0)
+    cap_plus, cap_minus = groove.flanks
+    naive_sum = np.array(
+        [
+            cap_plus.pressure_at(0.0, float(yy) - y0) + cap_minus.pressure_at(0.0, float(yy) + y0)
+            for yy in y
+        ]
+    )
+    envelope = np.array([groove.pressure_at(0.0, float(yy)) for yy in y])
+    return naive_sum, envelope, groove
 
 
 # --------------------------------------------------------------------------- #
@@ -273,21 +313,98 @@ def _panel_calibration(ax: Axes, cal: PeakCalibration) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# (B, C) The separated cap vs the solver, and the 2-D Coulomb traction cap.
+# (B) Half overlap: the exact solver vs the naive sum vs the envelope.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class OverlapCut:
+    """One half-overlap solve plus the naive-sum and envelope reconstructions."""
+
+    y0: float
+    y: NDArray[np.float64]
+    cut: NDArray[np.float64]
+    sum_cut: NDArray[np.float64]
+    env_cut: NDArray[np.float64]
+    ay: float
+    sum_err: float
+    env_err: float
+
+
+def overlap_cut() -> OverlapCut:
+    """Solve the half-overlap groove and reconstruct its meridional cut."""
+    sol, y0, _dx, dy = solve_groove(OVERLAP_SHIM, LOAD, cells=CELLS_PER_SEMI_FINE)
+    pressure = np.asarray(sol.pressure)
+    nx, ny = pressure.shape
+    y = (np.arange(ny) - (ny - 1) / 2.0) * dy
+    cut = pressure[nx // 2, :]
+    sum_cut, env_cut, groove = reconstruct_cuts(sol, y0, y)
+    _, ay = groove.flanks[0].semi_axes
+    peak = cut.max()
+    return OverlapCut(
+        y0=y0,
+        y=y,
+        cut=cut,
+        sum_cut=sum_cut,
+        env_cut=env_cut,
+        ay=ay,
+        sum_err=float((sum_cut.max() - peak) / peak),
+        env_err=float((env_cut.max() - peak) / peak),
+    )
+
+
+def _panel_overlap_cut(ax: Axes, cut: OverlapCut) -> None:
+    """Draw the half-overlap cut: solver vs naive sum (spike) vs envelope (saddle)."""
+    y_mm = cut.y * MM
+    ax.fill_between(
+        y_mm,
+        MU * cut.env_cut * GPA,
+        color=LAW_COLOUR,
+        alpha=0.18,
+        label=rf"Coulomb cap $\mu p$  ($\mu={MU}$)",
+    )
+    ax.plot(
+        y_mm,
+        cut.sum_cut * GPA,
+        color=SUM_COLOUR,
+        lw=1.8,
+        ls="--",
+        label="naive sum (seam double-count)",
+    )
+    ax.plot(
+        y_mm,
+        cut.env_cut * GPA,
+        color=LAW_COLOUR,
+        lw=2.0,
+        label=r"envelope $\max(p_+, p_-)$",
+    )
+    ax.scatter(
+        y_mm, cut.cut * GPA, s=10, c=SOLVER_COLOUR, alpha=0.8, zorder=3, label="solver (exact)"
+    )
+    span = cut.y0 + 2.0 * cut.ay
+    ax.set_xlim(-span * MM, span * MM)
+    ax.set_ylim(bottom=0.0, top=1.08 * cut.sum_cut.max() * GPA)
+    ax.set_xlabel("y (mm) — across the groove")
+    ax.set_ylabel("pressure (GPa)")
+    ax.set_title(
+        f"(B) Half overlap $y_0=b/2$ — envelope {cut.env_err * 100:+.1f}%, "
+        f"naive sum {cut.sum_err * 100:+.0f}%",
+        fontweight="bold",
+        fontsize=9.5,
+    )
+    ax.grid(visible=True, alpha=0.25)
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+
+
+# --------------------------------------------------------------------------- #
+# (C) The 2-D Coulomb traction cap (separated groove).
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class SeparatedCap:
     """One separated solve plus the reconstructed per-flank caps."""
 
     y0: float
-    y: NDArray[np.float64]
-    cut: NDArray[np.float64]
-    recon_cut: NDArray[np.float64]
-    peak_ratio: float
-    cut_residual: float
     cap_plus: hertzian.FlankPressure
-    cap_minus: hertzian.FlankPressure
     q_plus: float
+    load_integral: float
     pressure: NDArray[np.float64]
     x_grid: NDArray[np.float64]
     y_grid: NDArray[np.float64]
@@ -301,70 +418,20 @@ def separated_cap() -> SeparatedCap:
     nx, ny = pressure.shape
     x = (np.arange(nx) - (nx - 1) / 2.0) * dx
     y = (np.arange(ny) - (ny - 1) / 2.0) * dy
-    cut = pressure[nx // 2, :]
 
     law = LAW.with_flank_coupling(e_star=E_STAR, offset=y0)
     q_plus, q_minus = law.coupled_loads(delta, delta)
     cap_plus = law.flank_pressure(q_plus)
     cap_minus = law.flank_pressure(q_minus)
-    recon = np.array(
-        [
-            cap_plus.pressure_at(0.0, float(yy) - y0) + cap_minus.pressure_at(0.0, float(yy) + y0)
-            for yy in y
-        ]
-    )
-    mask = cut > 0.02 * cut.max()
-    residual = float(np.sqrt(np.mean((recon - cut)[mask] ** 2)) / cut.max())
     return SeparatedCap(
         y0=y0,
-        y=y,
-        cut=cut,
-        recon_cut=recon,
-        peak_ratio=float(recon.max() / cut.max()),
-        cut_residual=residual,
         cap_plus=cap_plus,
-        cap_minus=cap_minus,
         q_plus=q_plus,
+        load_integral=cap_plus.load + cap_minus.load,
         pressure=pressure,
         x_grid=x,
         y_grid=y,
     )
-
-
-def _panel_cut(ax: Axes, cap: SeparatedCap) -> None:
-    """Draw the separated meridional cut: solver vs reconstructed cap (shaded mu p)."""
-    y_mm = cap.y * MM
-    ax.fill_between(
-        y_mm,
-        MU * cap.recon_cut * GPA,
-        color=LAW_COLOUR,
-        alpha=0.18,
-        label=rf"Coulomb cap $\mu p$  ($\mu={MU}$)",
-    )
-    ax.plot(
-        y_mm,
-        cap.recon_cut * GPA,
-        color=LAW_COLOUR,
-        lw=2.0,
-        label=r"reduced cap $p$ (two half-ellipsoids)",
-    )
-    ax.scatter(
-        y_mm, cap.cut * GPA, s=10, c=SOLVER_COLOUR, alpha=0.8, zorder=3, label="solver (exact)"
-    )
-    ax.set_xlim(
-        -(cap.y0 + 2.2 * cap.cap_plus.semi_axes[1]) * MM,
-        (cap.y0 + 2.2 * cap.cap_plus.semi_axes[1]) * MM,
-    )
-    ax.set_ylim(bottom=0.0)
-    ax.set_xlabel("y (mm) — across the groove")
-    ax.set_ylabel("pressure (GPa)")
-    title = (
-        f"(B) Per-flank cap vs solver — peak {cap.peak_ratio:.3f}, "
-        f"cut {cap.cut_residual * 100:.1f}%"
-    )
-    ax.set_title(title, fontweight="bold", fontsize=10)
-    ax.grid(visible=True, alpha=0.25)
-    ax.legend(frameon=False, fontsize=8, loc="upper right")
 
 
 def _panel_traction_cap(ax: Axes, cap: SeparatedCap) -> None:
@@ -376,8 +443,10 @@ def _panel_traction_cap(ax: Axes, cap: SeparatedCap) -> None:
     ys = np.linspace(-span_y, span_y, 320)
     gx, gy = np.meshgrid(xs, ys, indexing="ij")
     p0 = cap.cap_plus.peak_pressure
-    field = p0 * np.sqrt(np.clip(1.0 - (gx / axp) ** 2 - ((gy - cap.y0) / ayp) ** 2, 0.0, None))
-    field += p0 * np.sqrt(np.clip(1.0 - (gx / axp) ** 2 - ((gy + cap.y0) / ayp) ** 2, 0.0, None))
+    upper = p0 * np.sqrt(np.clip(1.0 - (gx / axp) ** 2 - ((gy - cap.y0) / ayp) ** 2, 0.0, None))
+    lower = p0 * np.sqrt(np.clip(1.0 - (gx / axp) ** 2 - ((gy + cap.y0) / ayp) ** 2, 0.0, None))
+    # The envelope (pointwise max) — identical to the sum here (disjoint footprints).
+    field = np.maximum(upper, lower)
     mesh = ax.pcolormesh(gx * MM, gy * MM, MU * field * GPA, cmap="magma", shading="auto")
     plt.colorbar(mesh, ax=ax, label=r"$\mu\,p$ (GPa)", fraction=0.046, pad=0.04)
 
@@ -396,57 +465,61 @@ def _panel_traction_cap(ax: Axes, cap: SeparatedCap) -> None:
     # (equal aspect would draw the footprint as two unreadable slivers).
     ax.set_xlabel("x (mm) — circumferential (note: scale ≠ y)")
     ax.set_ylabel("y (mm) — meridional")
-    ax.set_title(r"(C) 2-D Coulomb traction cap $\mu\,p(x,y)$", fontweight="bold", fontsize=10)
+    ax.set_title(
+        r"(C) 2-D Coulomb traction cap $\mu\,p(x,y)$ (separated)", fontweight="bold", fontsize=10
+    )
     ax.legend(frameon=False, fontsize=8, loc="upper right")
 
 
 # --------------------------------------------------------------------------- #
-# (D) Validity: reconstructed vs solver peak as the shim closes.
+# (D) Validity: envelope vs naive-sum peak as the shim closes.
 # --------------------------------------------------------------------------- #
 def validity_curve(
     separations_in_b: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Return ``(solver_peak, reconstructed_peak)`` in GPa per flank separation."""
-    semi_minor = elliptic_hertz(RADIUS_X, RADIUS_Y, LOAD / 2.0, E_STAR)[1]
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Return ``(solver_peak, sum_peak, envelope_peak)`` in GPa per flank separation."""
     solver_peak = np.empty(separations_in_b.size)
-    recon_peak = np.empty(separations_in_b.size)
+    sum_peak = np.empty(separations_in_b.size)
+    env_peak = np.empty(separations_in_b.size)
     for i, sep in enumerate(separations_in_b):
-        y0 = float(sep) * semi_minor
+        y0 = float(sep) * B
         offset = y0 * (TUBE - BALL) / BALL
         sol, _, _, dy = solve_groove(offset, LOAD)
         pressure = np.asarray(sol.pressure)
         nx, ny = pressure.shape
         y = (np.arange(ny) - (ny - 1) / 2.0) * dy
         solver_peak[i] = pressure[nx // 2, :].max()
-        law = LAW.with_flank_coupling(e_star=E_STAR, offset=y0)
-        q_plus, q_minus = law.coupled_loads(sol.approach, sol.approach)
-        cap_p, cap_m = law.flank_pressure(q_plus), law.flank_pressure(q_minus)
-        recon = np.array(
-            [
-                cap_p.pressure_at(0.0, float(yy) - y0) + cap_m.pressure_at(0.0, float(yy) + y0)
-                for yy in y
-            ]
-        )
-        recon_peak[i] = recon.max()
-    return solver_peak, recon_peak
+        sum_cut, env_cut, _ = reconstruct_cuts(sol, y0, y)
+        sum_peak[i] = sum_cut.max()
+        env_peak[i] = env_cut.max()
+    return solver_peak, sum_peak, env_peak
 
 
 def _panel_validity(
     ax: Axes,
     separations: NDArray[np.float64],
     solver_peak: NDArray[np.float64],
-    recon_peak: NDArray[np.float64],
+    sum_peak: NDArray[np.float64],
+    env_peak: NDArray[np.float64],
 ) -> None:
-    """Draw the reconstructed vs solver peak vs separation, marking the resolved band."""
-    ax.axvspan(0.0, 1.0, color="0.92", label=r"overlap (merge, next stage)")
+    """Draw envelope vs naive-sum peak against the solver, marking the overlap band."""
+    ax.axvspan(separations.min(), 1.0, color="0.92", label="overlap (footprints cross)")
     ax.plot(
-        separations, recon_peak * GPA, color=LAW_COLOUR, lw=2.0, label="reduced cap (superposed)"
+        separations,
+        sum_peak * GPA,
+        color=SUM_COLOUR,
+        lw=2.0,
+        ls="--",
+        label="naive sum (superposed)",
+    )
+    ax.plot(
+        separations, env_peak * GPA, color=LAW_COLOUR, lw=2.0, label=r"envelope $\max(p_+,p_-)$"
     )
     ax.scatter(separations, solver_peak * GPA, s=28, c=SOLVER_COLOUR, zorder=3, label="solver peak")
     ax.set_xlabel(r"flank separation $y_0 / b$")
     ax.set_ylabel("peak pressure (GPa)")
     ax.set_title(
-        "(D) Exact where flanks are resolved; superposition over-counts the merge",
+        "(D) The envelope tracks the solver; the naive sum over-counts the overlap",
         fontweight="bold",
         fontsize=9.5,
     )
@@ -469,30 +542,34 @@ def main() -> None:
         f"(spread {cal.ratio_spread:.4f})"
     )
 
-    cap = separated_cap()
+    cut = overlap_cut()
     print(
-        f"  separated cap: peak ratio {cap.peak_ratio:.4f}  cut rel-L2 "
-        f"{cap.cut_residual * 100:.2f}%"
-    )
-    print(
-        f"  footprint integrates to Q = {cap.cap_plus.load:.3f} N "
-        f"(coupled Q_+ = {cap.q_plus:.3f} N)  ->  full-sliding friction mu Q = "
-        f"{MU * cap.cap_plus.load:.2f} N"
+        f"  half overlap (y0 = b/2): solver peak {cut.cut.max() * GPA:.3f} GPa; "
+        f"envelope {cut.env_err * 100:+.1f}%, naive sum {cut.sum_err * 100:+.0f}%"
     )
 
-    separations = np.linspace(0.4, 2.4, 9)
-    solver_peak, recon_peak = validity_curve(separations)
-    resolved = separations >= 1.0
-    resolved_err = float(
-        np.max(np.abs(recon_peak[resolved] - solver_peak[resolved]) / solver_peak[resolved])
+    cap = separated_cap()
+    print(
+        f"  separated footprint integrates to Q_+ + Q_- = {cap.load_integral:.2f} N "
+        f"(coupled Q_+ = {cap.q_plus:.2f} N)  ->  full-sliding friction mu Q = "
+        f"{MU * cap.load_integral:.2f} N"
     )
-    print(f"  resolved-regime peak error (y0/b >= 1): {resolved_err * 100:.1f}%")
+
+    separations = np.linspace(0.35, 2.4, 9)
+    solver_peak, sum_peak, env_peak = validity_curve(separations)
+    resolved = separations >= 1.0
+    sum_resolved = float(
+        np.max(np.abs(sum_peak[resolved] - solver_peak[resolved]) / solver_peak[resolved])
+    )
+    env_overlap = float(np.max(np.abs(env_peak - solver_peak) / solver_peak))
+    print(f"  resolved-regime peak error (y0/b >= 1): naive sum {sum_resolved * 100:.1f}%")
+    print(f"  envelope peak error across the whole sweep: <= {env_overlap * 100:.1f}%")
 
     fig, axes = plt.subplots(2, 2, figsize=(12.6, 9.4))
     _panel_calibration(axes[0, 0], cal)
-    _panel_cut(axes[0, 1], cap)
+    _panel_overlap_cut(axes[0, 1], cut)
     _panel_traction_cap(axes[1, 0], cap)
-    _panel_validity(axes[1, 1], separations, solver_peak, recon_peak)
+    _panel_validity(axes[1, 1], separations, solver_peak, sum_peak, env_peak)
     fig.suptitle(
         "hertzian — the per-flank pressure footprint: a lightweight Coulomb-friction cap",
         fontsize=13,
