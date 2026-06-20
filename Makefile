@@ -49,6 +49,7 @@ gallery: build ## Render the README validation gallery into docs/img (uses matpl
 	uv run --with matplotlib python scripts/fit_reduced_law.py
 	uv run --with matplotlib python scripts/render_coupling_cross_section.py
 	uv run --with matplotlib python scripts/render_pressure_distribution.py
+	uv run --with matplotlib python scripts/render_pressure_distribution_asymmetric.py
 
 test: test-rust test-py ## Run the full test suite (Rust + Python)
 
