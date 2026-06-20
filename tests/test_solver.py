@@ -38,10 +38,23 @@ MAX_PEAK_OFFSET_CELLS = 1
 FLANK_SYMMETRY_RTOL = 0.02
 FLANK_LOCATION_RTOL = 0.10
 
+# Asymmetric (2:1) two-torus: the off-centre drive produces a clearly ~2:1 crest
+# ratio, an ~8:1 load split (by the cube-root cap p0 ∝ Q^{1/3}), and the lightweight
+# cap tracks the field within a few percent.
+TWO_TO_ONE_PEAK_BAND = (1.7, 2.3)
+EIGHT_TO_ONE_LOAD_BAND = (6.0, 11.0)
+ASYMMETRIC_CAP_RTOL = 0.05
+
 
 def _relative_error(actual: float, expected: float) -> float:
     """Return the relative error ``|actual - expected| / |expected|``."""
     return abs(actual - expected) / abs(expected)
+
+
+def _even_ceil(value: float) -> int:
+    """Round ``value`` up to the next even integer (a clean FFT grid size)."""
+    n = math.ceil(value)
+    return n + (n % 2)
 
 
 def _circular_hertz(radius: float, load: float, e_star: float) -> tuple[float, float, float]:
@@ -286,6 +299,89 @@ def test_sphere_in_gothic_arch_half_overlapping_flanks() -> None:
     # The split still lowers the peak below the single full-load arc — just less
     # than full separation, since the overlapping flanks reinforce each other.
     assert peak < single.max_pressure
+
+
+def test_asymmetric_gothic_flanks_cap_a_two_to_one_peak() -> None:
+    """An off-centre drive makes the two-torus crests stand 2:1; the cap reproduces it.
+
+    Coulomb friction is engaged when the ball is *dragged* across the groove, so the
+    load shifts onto one flank and the two pressure crests pull apart. Driving the
+    *same* two-torus shape off-centre — a meridional well-floor offset that presses
+    the near flank deeper, the height-field dual of a transverse ball displacement —
+    until the crests stand 2:1, the lightweight cap must still reproduce the field:
+    each flank an elliptic-Hertz patch on the cube-root cap ``p0 = cp Q^{1/3}``, so a
+    2:1 peak ratio is an 8:1 load split, and the envelope crest is the dominant flank.
+    (The geometry is pinned analytically in the Rust scenario tests; this binding test
+    checks the asymmetric split and cap the height-field path produces.)
+    """
+    ball, tube, centre_radius, e_star = 4.0e-3, 4.16e-3, 15.0e-3, 100.0e9  # r/Rs = 1.04
+    load = 120.0
+    radius_x = 1.0 / (1.0 / ball + 1.0 / centre_radius)
+    radius_y = 1.0 / (1.0 / ball - 1.0 / tube)
+
+    # The calibrated flank cap supplies the contact shape and stiffness: the half-load
+    # flank sizes the mesh and sets the off-centre drive (its Hertz approach delta0),
+    # the full-load flank bounds the heavier footprint.
+    law0 = hertzian.GothicArchLaw.from_elliptic_flank(
+        radius_x=radius_x, radius_y=radius_y, e_star=e_star, contact_angle=0.4
+    )
+    _, ay_half = law0.flank_pressure(load / 2.0).semi_axes
+    ax_heavy, ay_heavy = law0.flank_pressure(load).semi_axes
+    delta0 = (load / 2.0 / law0.stiffness) ** (2.0 / 3.0)
+    y0 = 2.0 * ay_half  # separated: two distinct crests
+    floor_offset = delta0  # off-centre drive -> ~2:1 crest ratio
+
+    # The unchanged two-torus gap (pointwise minimum of two flank wells at y = ±y0),
+    # with the lower well lifted so the upper flank is pressed deeper and carries more.
+    dx, dy = ax_heavy / 10.0, ay_heavy / 12.0
+    nx = _even_ceil(2.5 * ax_heavy / dx * 2.0)
+    ny = _even_ceil((y0 + 2.5 * ay_heavy) / dy * 2.0)
+    x = (np.arange(nx, dtype=np.float64) - (nx - 1) / 2.0) * dx
+    y = (np.arange(ny, dtype=np.float64) - (ny - 1) / 2.0) * dy
+    well_upper = (y[np.newaxis, :] - y0) ** 2 / (2.0 * radius_y)
+    well_lower = (y[np.newaxis, :] + y0) ** 2 / (2.0 * radius_y) + floor_offset
+    gap = x[:, np.newaxis] ** 2 / (2.0 * radius_x) + np.minimum(well_upper, well_lower)
+
+    sol = hertzian.solve_height_field(
+        gap=np.ascontiguousarray(gap, dtype=np.float64),
+        load=load,
+        e_star=e_star,
+        dx=dx,
+        dy=dy,
+        tol=1e-9,
+        max_iter=40000,
+    )
+    assert sol.diagnostics.converged
+    assert _relative_error(sol.total_load, load) <= LOAD_RTOL
+
+    pressure = sol.pressure
+    mid = ny // 2
+    upper = float(pressure[:, mid:].max())
+    lower = float(pressure[:, :mid].max())
+    peak_ratio = upper / lower
+    peak_lo, peak_hi = TWO_TO_ONE_PEAK_BAND
+    assert peak_lo <= peak_ratio <= peak_hi  # a clearly asymmetric two-torus, ~2:1
+
+    # Integrate each meridional half: the two flank loads. The Gothic point carries
+    # nothing when separated, so the split is clean — and ~8:1 for a 2:1 peak.
+    cell = dx * dy
+    q_upper = float(pressure[:, mid:].sum() * cell)
+    q_lower = float(pressure[:, :mid].sum() * cell)
+    load_lo, load_hi = EIGHT_TO_ONE_LOAD_BAND
+    assert load_lo <= q_upper / q_lower <= load_hi
+    cube_root_split = (q_upper / q_lower) ** (1.0 / 3.0)
+    assert _relative_error(cube_root_split, peak_ratio) <= ASYMMETRIC_CAP_RTOL
+
+    # The lightweight cap, given the same off-centre drive (s_+ = delta, s_- = delta
+    # - df), reproduces the field with no field integral: the envelope crest tracks
+    # the solver peak and is the dominant (dragged-into) flank.
+    law = law0.with_flank_coupling(e_star=e_star, offset=y0)
+    q_plus, q_minus = law.coupled_loads(sol.approach, sol.approach - floor_offset)
+    groove = law.groove_pressure(q_plus, q_minus, offset=y0)
+    assert _relative_error(groove.peak_pressure, sol.max_pressure) <= ASYMMETRIC_CAP_RTOL
+    cap_upper, cap_lower = groove.flanks
+    assert math.isclose(groove.peak_pressure, cap_upper.peak_pressure, rel_tol=EXACT_RTOL)
+    assert cap_upper.peak_pressure > 1.5 * cap_lower.peak_pressure
 
 
 def test_height_field_matches_sphere_shortcut() -> None:

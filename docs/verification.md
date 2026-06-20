@@ -190,6 +190,41 @@ $\eta$ と分割は Rust のシナリオテスト
 `gothic_groove_pressure_envelope_caps_the_overlap`）と Rust／Python のユニットテストで固定
 しています。
 
+### 非対称な 2:1 面圧キャップの検証
+
+ここまでの面圧キャップは、玉を溝へ**まっすぐ**押し込む対称な押し込みで、2つのフランクが荷重を
+等分し面圧ピークが 1:1 の場合でした。けれどもクーロン摩擦が効くのは玉が溝を**横切って引きずられる**
+ときで、横断ドライブが荷重を片方のフランクへ寄せ、2つの面圧ピークは開きます。**形状はそのまま**
+（2トーラスのフランク干渉モデル）に横断ドライブだけを与え、面圧ピークが**2:1**になるところまで
+寄せたのが本タスクの解析です。場ソルバでは横断変位を子午線方向の**井戸床オフセット** $df$——
+2つのフランク井戸の片方を $df$ だけ持ち上げ、近い側のフランクをそれだけ深く押す、玉の横変位の
+高さ場での裏返し——として与えます（ギャップは2トーラスの点ごとの最小のまま）。ギャラリーと同じ
+保形溝（分離フランク $y_0 \approx 1.63\,\mathrm{mm}$、65 µm シム相当）で $df \approx 6.9\,\mu\mathrm{m}$
+が面圧ピーク比 $p_+ : p_- = 2.00 : 1$（$p_+ \approx 2.10\,\mathrm{GPa}$、$p_- \approx 1.05\,\mathrm{GPa}$）
+を生みます。
+
+![per-flank 非対称（2:1）面圧キャップの4パネル検証。(A) 横断ドライブのスイープで、深い側 p+ と浅い側 p- の両クレストが単一の立方根線 cp·Q^(1/3) に乗る対数–対数較正（ソルバ/線 1.0007）。(B) 2:1 ドライブの子午線断面で、ソルバ（厳密、橙点）と軽量包絡 max(p+,p−)（紫）を並べ、2つのクレストがきれいな 2:1（2.10 と 1.05 GPa）、footprint は分離しているので包絡は和と一致しソルバに −0.0% で乗る。網掛けは片寄ったクーロンキャップ μp。(C) 2次元クーロンキャップ μp(x,y) を2つの不等なフランク楕円のヒートマップで描き、大きな主パッチ（μQ+≈85N）と小さな隣パッチ（μQ−≈11N）、ソルバの接触縁を重ねる。(D) 横断ドライブを上げるとピーク比が 1:1 から 2:1 へ上がり、軽量カップリング則の予測 (Q+/Q−)^(1/3) がソルバ点を 0.4% 以内で追う。](img/flank_pressure_asymmetric.png)
+
+- **(A) 較正 — 両フランクが同じ立方根線に乗る。** 横断ドライブをスイープすると、深い側 $p_+$ と
+  浅い側 $p_-$ の両クレストが単一の立方根線 $c_p Q^{1/3}$ に乗ります（ソルバ/線 **1.0007**、散らばり
+  ほぼゼロ）。各フランクが自分の荷重 $Q$ を担う楕円 Hertz パッチである証拠で、ピークは立方根で
+  スケールするので、**2:1 のピーク比はちょうど 8:1 の荷重分割**になります（$Q_+ \approx 711$、
+  $Q_- \approx 89\,\mathrm{N}$、分割 $8.0$）。
+- **(B) 2:1 断面 — 厳密 vs 軽量。** 2:1 ドライブの子午線断面で、ソルバ（厳密、橙点）と軽量包絡
+  $\max(p_+, p_-)$（紫）を並べます。2つのクレストはきれいな 2:1 で、footprint は分離している
+  （$2 y_0 \ge a_y^+ + a_y^-$）ので包絡は和と一致し、ソルバに **−0.0 %** で乗ります。網掛けは
+  クーロンキャップ $\mu p$——いまや片寄って、引きずられた側のフランクがトラクションを担います。
+- **(C) 2次元クーロンキャップ。** $\mu p(x,y)$ を2つの**不等な**フランク楕円として描き、ソルバの
+  接触縁を重ねます。大きな主パッチ（$\mu Q_+ \approx 85\,\mathrm{N}$）と小さな隣パッチ
+  （$\mu Q_- \approx 11\,\mathrm{N}$）で、各々が $\mu Q$ の全滑り摩擦に積分されます。
+- **(D) 分割の予測。** 横断ドライブを上げると、2トーラスのピーク比が 1:1 から 2:1 へ上がります。
+  軽量カップリング則の予測 $(Q_+/Q_-)^{1/3}$ がソルバ点を全域で **0.4 % 以内**で追います。
+
+2:1 の面圧ピーク（立方根則による ~8:1 荷重分割）、両クレストが $c_p Q^{1/3}$ に乗ること、包絡
+クレストがソルバピークに乗り主フランクと一致すること、各キャップが荷重に積分されることは、Rust の
+シナリオテスト（`gothic_asymmetric_pressure_caps_a_two_to_one_peak`）と Python バインディング
+テスト（`test_asymmetric_gothic_flanks_cap_a_two_to_one_peak`）で固定しています。
+
 ---
 
 ## 相互検証
@@ -238,9 +273,11 @@ uv run --with tamaas pytest tests/test_cross_validation.py
 | 縮約則のカップリング | `gothic_coupling_tracks_the_effective_flank_count`、`gothic_coupling_captures_the_load_split`（Rust） |
 | 荷重重心のずれ | `gothic_overlap_shifts_the_load_centroid_outboard`（Rust） |
 | 面圧キャップ | `gothic_flank_pressure_caps_the_field_solver`、`gothic_groove_pressure_envelope_caps_the_overlap`（Rust） |
+| 非対称な 2:1 面圧キャップ | `gothic_asymmetric_pressure_caps_a_two_to_one_peak`（Rust）、`test_asymmetric_gothic_flanks_cap_a_two_to_one_peak`（Python） |
 
 図は `make gallery` で再生成します（個別には
 [`scripts/render_coupling_cross_section.py`](../scripts/render_coupling_cross_section.py)、
 [`scripts/fit_reduced_law.py`](../scripts/fit_reduced_law.py)、
-[`scripts/render_pressure_distribution.py`](../scripts/render_pressure_distribution.py)）。
+[`scripts/render_pressure_distribution.py`](../scripts/render_pressure_distribution.py)、
+[`scripts/render_pressure_distribution_asymmetric.py`](../scripts/render_pressure_distribution_asymmetric.py)）。
 matplotlib は描画のためだけに使う依存で、ロック環境からは意図的に外しています。

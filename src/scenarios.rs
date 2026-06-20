@@ -910,6 +910,120 @@ mod tests {
     }
 
     #[test]
+    fn gothic_asymmetric_pressure_caps_a_two_to_one_peak() {
+        // Coulomb friction is engaged when the ball is *dragged* across the groove:
+        // the transverse drive shifts the load onto one flank and the two crests pull
+        // apart. Driving the *same* two-torus off-centre — a meridional well-floor
+        // offset `df`, the height-field dual of a transverse ball shift pressing the
+        // near flank deeper — to a 2:1 crest ratio, the per-flank cap must still
+        // reproduce the field (a 2:1 peak is an 8:1 load split, by the cube-root cap
+        // `p0 = cp Q^{1/3}`; the envelope crest is the dominant, dragged-into flank).
+        let ball = 4.0e-3;
+        let tube = 1.04 * ball;
+        let centre_radius = 15.0e-3;
+        let material = Material::from_e_star(100.0e9);
+        let load = 120.0;
+        let config = Config {
+            tolerance: 1.0e-9,
+            max_iterations: 40_000,
+        };
+
+        let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
+        let (radius_x, radius_y) = (radii.radius_x(), radii.radius_y());
+        // One isolated flank at half the load: its semi-axes size the mesh, and its
+        // Hertz approach `delta0` sets the off-centre drive. Pushing the near flank
+        // `df = delta0` deeper drives the crests to ~2:1 (an ~8:1 load split).
+        let half = HertzElliptic::new(radius_x, radius_y, load / 2.0, material.e_star());
+        let heavy = HertzElliptic::new(radius_x, radius_y, load, material.e_star());
+        let y0 = 2.0 * half.semi_axis_y(); // separated: two distinct crests
+        let floor_offset = half.approach();
+
+        // The unchanged two-torus gap — the pointwise minimum of two flank wells at
+        // y = ±y0 — but with the lower well lifted by `floor_offset`, so the upper
+        // flank is pressed deeper and carries the larger load.
+        let half_curvature_x = 0.5 / radius_x;
+        let half_curvature_y = 0.5 / radius_y;
+        let dx = heavy.semi_axis_x() / 10.0;
+        let dy = heavy.semi_axis_y() / 12.0;
+        let nx = even_ceil(2.0 * 2.5 * heavy.semi_axis_x() / dx);
+        let ny = even_ceil(2.0 * (y0 + 2.5 * heavy.semi_axis_y()) / dy);
+        let grid = Grid::new(nx, ny, dx, dy);
+        let gap = grid.sample(|x, y| {
+            let well_upper = half_curvature_y * (y - y0) * (y - y0);
+            let well_lower = half_curvature_y * (y + y0) * (y + y0) + floor_offset;
+            half_curvature_x * x * x + well_upper.min(well_lower)
+        });
+        let sol = solve_sampled_gap(gap, material, load, grid.clone(), config);
+        assert!(
+            sol.diagnostics().converged,
+            "asymmetric solve did not converge"
+        );
+        assert_relative(sol.total_load(), load, 1.0e-6, "total load");
+
+        // The two crests stand ~2:1 — a clearly asymmetric two-torus — the deep one
+        // at y = +y0.
+        let (upper_peak, _, j_upper) = flank_peak(&sol, true);
+        let lower_peak = flank_peak(&sol, false).0;
+        let peak_ratio = upper_peak / lower_peak;
+        assert!(
+            (1.7..=2.3).contains(&peak_ratio),
+            "the two-torus crests must stand ~2:1: {peak_ratio}",
+        );
+        assert_relative(grid.y(j_upper), y0, 0.12, "deep-flank location");
+
+        // Integrate the pressure over each meridional half: the two flank loads. The
+        // Gothic point carries nothing when separated, so the split is clean.
+        let cell = grid.cell_area();
+        let mid = sol.pressure().ncols() / 2;
+        let (mut q_upper, mut q_lower) = (0.0_f64, 0.0_f64);
+        for ((_, j), &p) in sol.pressure().indexed_iter() {
+            if j >= mid {
+                q_upper += p * cell;
+            } else {
+                q_lower += p * cell;
+            }
+        }
+        // 2:1 peak <=> 8:1 load, by the cube-root cap p0 ∝ Q^{1/3}.
+        assert!(
+            (6.0..=11.0).contains(&(q_upper / q_lower)),
+            "a 2:1 peak is an ~8:1 load split: {}",
+            q_upper / q_lower,
+        );
+        assert_relative(
+            (q_upper / q_lower).cbrt(),
+            peak_ratio,
+            0.05,
+            "peak ratio is the cube root of the load split",
+        );
+
+        // The lightweight cap, given the same drive (s_+ = delta, s_- = delta - df in
+        // flank-approach space), reproduces the field with no field integral: the
+        // coupled deep-flank load matches, and the envelope crest tracks the solver
+        // peak and is the dominant (dragged-into) flank.
+        let law = GothicArchLaw::from_elliptic_flank(radius_x, radius_y, material.e_star(), 0.4)
+            .with_flank_coupling(material.e_star(), y0);
+        let (q_plus, q_minus) = law.coupled_loads(sol.approach(), sol.approach() - floor_offset);
+        assert_relative(q_plus, q_upper, 0.08, "lightweight deep-flank load");
+
+        let groove_cap = law
+            .groove_pressure(q_plus, q_minus, y0)
+            .expect("the calibrated law has a footprint");
+        assert_relative(
+            groove_cap.peak_pressure(),
+            sol.max_pressure(),
+            0.05,
+            "envelope crest vs solver peak",
+        );
+        let (cap_upper, cap_lower) = groove_cap.flanks();
+        assert!(
+            cap_upper.peak_pressure() > cap_lower.peak_pressure(),
+            "the envelope crest is the dominant, dragged-into flank",
+        );
+        // Each footprint integrates to its load, so full-sliding friction is mu Q.
+        assert_relative(cap_upper.load(), q_plus, 1.0e-9, "deep-flank cap integral");
+    }
+
+    #[test]
     fn gothic_overlap_shifts_the_load_centroid_outboard() {
         // The second-order directional signature: the flank *normal* rotates as the
         // contacts overlap. Each flank lifts the inboard side of its neighbour more
