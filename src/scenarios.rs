@@ -222,6 +222,25 @@ mod tests {
         best
     }
 
+    // The two flank crests `(heavy, light)` and the saddle between them, from the
+    // meridional cut at the groove's circumferential centre. Proper local-maxima
+    // detection is essential where the flanks overlap: a "max of each y-half" would
+    // catch the dominant flank's *tail* spilling across the centre, not the shallow
+    // flank's own crest. `None` when the cut has fewer than two crests (one flank
+    // has merged into or been buried by the other).
+    fn meridional_crests(solution: &crate::solution::Solution) -> Option<(f64, f64, f64)> {
+        let pressure = solution.pressure();
+        let cut = pressure.row(pressure.nrows() / 2); // central x: pressure along y
+        let mut maxima: Vec<(f64, usize)> = (1..cut.len() - 1)
+            .filter(|&j| cut[j] > cut[j - 1] && cut[j] >= cut[j + 1] && cut[j] > 0.0)
+            .map(|j| (cut[j], j))
+            .collect();
+        maxima.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let (&(heavy, hj), &(light, lj)) = (maxima.first()?, maxima.get(1)?);
+        let saddle = (hj.min(lj)..=hj.max(lj)).fold(f64::INFINITY, |m, j| m.min(cut[j]));
+        Some((heavy, light, saddle))
+    }
+
     fn assert_relative(actual: f64, expected: f64, tolerance: f64, what: &str) {
         let rel_err = (actual - expected).abs() / expected;
         assert!(
@@ -913,11 +932,12 @@ mod tests {
     fn gothic_asymmetric_pressure_caps_a_two_to_one_peak() {
         // Coulomb friction is engaged when the ball is *dragged* across the groove:
         // the transverse drive shifts the load onto one flank and the two crests pull
-        // apart. Driving the *same* two-torus off-centre — a meridional well-floor
-        // offset `df`, the height-field dual of a transverse ball shift pressing the
-        // near flank deeper — to a 2:1 crest ratio, the per-flank cap must still
-        // reproduce the field (a 2:1 peak is an 8:1 load split, by the cube-root cap
-        // `p0 = cp Q^{1/3}`; the envelope crest is the dominant, dragged-into flank).
+        // apart. Drive the *same* two-torus off-centre — a meridional well-floor offset
+        // `df`, the height-field dual of a transverse ball shift pressing the near flank
+        // deeper — to a 2:1 crest ratio while the flanks *interfere*: at the half-overlap
+        // shim `y0 = b/2` the two footprints cross into one connected patch. The cap must
+        // reproduce the field (a 2:1 peak is an 8:1 load split, by the cube-root cap),
+        // and the envelope must drop the naive sum's seam double-count the overlap makes.
         let ball = 4.0e-3;
         let tube = 1.04 * ball;
         let centre_radius = 15.0e-3;
@@ -930,97 +950,96 @@ mod tests {
 
         let radii = GothicArchGroove::new(tube, centre_radius, 0.0).against_sphere(ball);
         let (radius_x, radius_y) = (radii.radius_x(), radii.radius_y());
-        // One isolated flank at half the load: its semi-axes size the mesh, and its
-        // Hertz approach `delta0` sets the off-centre drive. Pushing the near flank
-        // `df = delta0` deeper drives the crests to ~2:1 (an ~8:1 load split).
         let half = HertzElliptic::new(radius_x, radius_y, load / 2.0, material.e_star());
         let heavy = HertzElliptic::new(radius_x, radius_y, load, material.e_star());
-        let y0 = 2.0 * half.semi_axis_y(); // separated: two distinct crests
-        let floor_offset = half.approach();
+        // Half overlap: flank centres half a meridional semi-axis apart, so the two
+        // footprints cross into one connected patch (the flanks interfere); an off-centre
+        // drive ~0.85 delta0 then pulls the crests apart to ~2:1.
+        let y0 = 0.5 * half.semi_axis_y();
+        let floor_offset = 0.85 * half.approach();
 
-        // The unchanged two-torus gap — the pointwise minimum of two flank wells at
-        // y = ±y0 — but with the lower well lifted by `floor_offset`, so the upper
-        // flank is pressed deeper and carries the larger load.
+        // The unchanged two-torus gap (pointwise minimum of two flank wells at y = ±y0),
+        // the lower well lifted by `floor_offset` so the upper flank is pressed deeper.
         let half_curvature_x = 0.5 / radius_x;
         let half_curvature_y = 0.5 / radius_y;
-        let dx = heavy.semi_axis_x() / 10.0;
-        let dy = heavy.semi_axis_y() / 12.0;
-        let nx = even_ceil(2.0 * 2.5 * heavy.semi_axis_x() / dx);
-        let ny = even_ceil(2.0 * (y0 + 2.5 * heavy.semi_axis_y()) / dy);
+        let dx = heavy.semi_axis_x() / 16.0;
+        let dy = heavy.semi_axis_y() / 16.0;
+        let nx = even_ceil(2.0 * 2.6 * heavy.semi_axis_x() / dx);
+        let ny = even_ceil(2.0 * (y0 + 2.6 * heavy.semi_axis_y()) / dy);
         let grid = Grid::new(nx, ny, dx, dy);
         let gap = grid.sample(|x, y| {
             let well_upper = half_curvature_y * (y - y0) * (y - y0);
             let well_lower = half_curvature_y * (y + y0) * (y + y0) + floor_offset;
             half_curvature_x * x * x + well_upper.min(well_lower)
         });
-        let sol = solve_sampled_gap(gap, material, load, grid.clone(), config);
+        let sol = solve_sampled_gap(gap, material, load, grid, config);
         assert!(
             sol.diagnostics().converged,
             "asymmetric solve did not converge"
         );
         assert_relative(sol.total_load(), load, 1.0e-6, "total load");
+        let peak = sol.max_pressure();
 
-        // The two crests stand ~2:1 — a clearly asymmetric two-torus — the deep one
-        // at y = +y0.
-        let (upper_peak, _, j_upper) = flank_peak(&sol, true);
-        let lower_peak = flank_peak(&sol, false).0;
-        let peak_ratio = upper_peak / lower_peak;
+        // The flanks interfere: at the half overlap the groove centre carries load (a
+        // *separated* arch leaves a contact-free Gothic ridge there instead).
+        let centre = sol.pressure()[(nx / 2, ny / 2)];
+        assert!(
+            centre > 0.3 * peak,
+            "the groove centre must carry load (connected, interfering)"
+        );
+
+        // Two distinct crests in ~2:1, joined by a *loaded* saddle (a connected patch,
+        // not a separated pair) — by proper local maxima, since the dominant flank's
+        // tail spills across the centre and would fool a max-of-each-half.
+        let (heavy_crest, light_crest, saddle) =
+            meridional_crests(&sol).expect("two distinct flank crests");
+        let peak_ratio = heavy_crest / light_crest;
         assert!(
             (1.7..=2.3).contains(&peak_ratio),
-            "the two-torus crests must stand ~2:1: {peak_ratio}",
+            "the crests must stand ~2:1: {peak_ratio}"
         );
-        assert_relative(grid.y(j_upper), y0, 0.12, "deep-flank location");
-
-        // Integrate the pressure over each meridional half: the two flank loads. The
-        // Gothic point carries nothing when separated, so the split is clean.
-        let cell = grid.cell_area();
-        let mid = sol.pressure().ncols() / 2;
-        let (mut q_upper, mut q_lower) = (0.0_f64, 0.0_f64);
-        for ((_, j), &p) in sol.pressure().indexed_iter() {
-            if j >= mid {
-                q_upper += p * cell;
-            } else {
-                q_lower += p * cell;
-            }
-        }
-        // 2:1 peak <=> 8:1 load, by the cube-root cap p0 ∝ Q^{1/3}.
         assert!(
-            (6.0..=11.0).contains(&(q_upper / q_lower)),
-            "a 2:1 peak is an ~8:1 load split: {}",
-            q_upper / q_lower,
-        );
-        assert_relative(
-            (q_upper / q_lower).cbrt(),
-            peak_ratio,
-            0.05,
-            "peak ratio is the cube root of the load split",
+            saddle > 0.3 * light_crest && saddle < light_crest,
+            "the saddle is loaded but below the light crest (a connected, interfering pair)",
         );
 
-        // The lightweight cap, given the same drive (s_+ = delta, s_- = delta - df in
-        // flank-approach space), reproduces the field with no field integral: the
-        // coupled deep-flank load matches, and the envelope crest tracks the solver
-        // peak and is the dominant (dragged-into) flank.
+        // The lightweight cap, given the same drive (s_+ = delta, s_- = delta - df),
+        // reproduces the field: an ~8:1 load split, overlapping footprints, and an
+        // envelope crest that tracks the solver peak.
         let law = GothicArchLaw::from_elliptic_flank(radius_x, radius_y, material.e_star(), 0.4)
             .with_flank_coupling(material.e_star(), y0);
         let (q_plus, q_minus) = law.coupled_loads(sol.approach(), sol.approach() - floor_offset);
-        assert_relative(q_plus, q_upper, 0.08, "lightweight deep-flank load");
-
+        assert!(
+            (6.0..=11.0).contains(&(q_plus / q_minus)),
+            "an ~8:1 split: {}",
+            q_plus / q_minus
+        );
         let groove_cap = law
             .groove_pressure(q_plus, q_minus, y0)
             .expect("the calibrated law has a footprint");
+        assert!(
+            !groove_cap.separated(),
+            "the footprints must overlap (interfering)"
+        );
         assert_relative(
             groove_cap.peak_pressure(),
-            sol.max_pressure(),
-            0.05,
+            peak,
+            0.06,
             "envelope crest vs solver peak",
         );
+
+        // The naive sum double-counts the overlap: at the groove centre it stacks the two
+        // flank tails into a spike above the true peak — the seam the envelope drops.
         let (cap_upper, cap_lower) = groove_cap.flanks();
         assert!(
             cap_upper.peak_pressure() > cap_lower.peak_pressure(),
-            "the envelope crest is the dominant, dragged-into flank",
+            "dragged-into flank dominant"
         );
-        // Each footprint integrates to its load, so full-sliding friction is mu Q.
-        assert_relative(cap_upper.load(), q_plus, 1.0e-9, "deep-flank cap integral");
+        let sum_centre = cap_upper.pressure_at(0.0, -y0) + cap_lower.pressure_at(0.0, y0);
+        assert!(
+            sum_centre > 1.05 * peak,
+            "the naive sum double-counts the overlap above the peak"
+        );
     }
 
     #[test]

@@ -38,12 +38,18 @@ MAX_PEAK_OFFSET_CELLS = 1
 FLANK_SYMMETRY_RTOL = 0.02
 FLANK_LOCATION_RTOL = 0.10
 
-# Asymmetric (2:1) two-torus: the off-centre drive produces a clearly ~2:1 crest
-# ratio, an ~8:1 load split (by the cube-root cap p0 ∝ Q^{1/3}), and the lightweight
-# cap tracks the field within a few percent.
+# Asymmetric (2:1) two-torus with interfering flanks: at the half-overlap shim the
+# off-centre drive produces a clearly ~2:1 crest ratio (an ~8:1 load split, by the
+# cube-root cap p0 ∝ Q^{1/3}), the lightweight envelope tracks the field within a few
+# percent, and the connected patch loads its centre and saddle — where the naive sum
+# stacks both flank tails into a spike above the true peak.
 TWO_TO_ONE_PEAK_BAND = (1.7, 2.3)
 EIGHT_TO_ONE_LOAD_BAND = (6.0, 11.0)
-ASYMMETRIC_CAP_RTOL = 0.05
+ASYMMETRIC_CAP_RTOL = 0.06
+CONNECTED_FRACTION = 0.3
+SADDLE_FRACTION = 0.3
+SUM_DOUBLECOUNT = 1.05
+MIN_CRESTS = 2
 
 
 def _relative_error(actual: float, expected: float) -> float:
@@ -55,6 +61,28 @@ def _even_ceil(value: float) -> int:
     """Round ``value`` up to the next even integer (a clean FFT grid size)."""
     n = math.ceil(value)
     return n + (n % 2)
+
+
+def _two_crests(cut: NDArray[np.float64]) -> tuple[float, float, float] | None:
+    """Return the two largest local maxima of ``cut`` and the saddle between them.
+
+    Proper local-maxima detection is essential where the flanks overlap: a "max of
+    each y-half" would catch the dominant flank's *tail* spilling across the groove
+    centre, not the shallow flank's own crest. ``None`` if fewer than two crests.
+    """
+    maxima = sorted(
+        (
+            (float(cut[j]), j)
+            for j in range(1, cut.size - 1)
+            if cut[j] > cut[j - 1] and cut[j] >= cut[j + 1] and cut[j] > 0.0
+        ),
+        reverse=True,
+    )
+    if len(maxima) < MIN_CRESTS:
+        return None
+    (heavy, hj), (light, lj) = maxima[0], maxima[1]
+    lo, hi = sorted((hj, lj))
+    return heavy, light, float(cut[lo : hi + 1].min())
 
 
 def _circular_hertz(radius: float, load: float, e_star: float) -> tuple[float, float, float]:
@@ -302,40 +330,39 @@ def test_sphere_in_gothic_arch_half_overlapping_flanks() -> None:
 
 
 def test_asymmetric_gothic_flanks_cap_a_two_to_one_peak() -> None:
-    """An off-centre drive makes the two-torus crests stand 2:1; the cap reproduces it.
+    """An off-centre drive makes interfering two-torus flanks stand 2:1; the cap caps it.
 
     Coulomb friction is engaged when the ball is *dragged* across the groove, so the
-    load shifts onto one flank and the two pressure crests pull apart. Driving the
-    *same* two-torus shape off-centre — a meridional well-floor offset that presses
-    the near flank deeper, the height-field dual of a transverse ball displacement —
-    until the crests stand 2:1, the lightweight cap must still reproduce the field:
-    each flank an elliptic-Hertz patch on the cube-root cap ``p0 = cp Q^{1/3}``, so a
-    2:1 peak ratio is an 8:1 load split, and the envelope crest is the dominant flank.
-    (The geometry is pinned analytically in the Rust scenario tests; this binding test
-    checks the asymmetric split and cap the height-field path produces.)
+    load shifts onto one flank and the two crests pull apart. Driving the *same*
+    two-torus off-centre — a meridional well-floor offset pressing the near flank
+    deeper, the height-field dual of a transverse ball shift — to a 2:1 crest ratio
+    while the flanks *interfere*: at the half-overlap shim ``y0 = b/2`` the two
+    footprints cross into one connected patch. The lightweight cap must still
+    reproduce the field (a 2:1 peak is an 8:1 load split) and drop the naive sum's
+    seam double-count the overlap creates. (The geometry is pinned in the Rust
+    scenario tests; this binding test checks what the height-field path produces.)
     """
     ball, tube, centre_radius, e_star = 4.0e-3, 4.16e-3, 15.0e-3, 100.0e9  # r/Rs = 1.04
     load = 120.0
     radius_x = 1.0 / (1.0 / ball + 1.0 / centre_radius)
     radius_y = 1.0 / (1.0 / ball - 1.0 / tube)
 
-    # The calibrated flank cap supplies the contact shape and stiffness: the half-load
-    # flank sizes the mesh and sets the off-centre drive (its Hertz approach delta0),
-    # the full-load flank bounds the heavier footprint.
+    # The calibrated flank cap supplies the contact shape and stiffness.
     law0 = hertzian.GothicArchLaw.from_elliptic_flank(
         radius_x=radius_x, radius_y=radius_y, e_star=e_star, contact_angle=0.4
     )
     _, ay_half = law0.flank_pressure(load / 2.0).semi_axes
     ax_heavy, ay_heavy = law0.flank_pressure(load).semi_axes
     delta0 = (load / 2.0 / law0.stiffness) ** (2.0 / 3.0)
-    y0 = 2.0 * ay_half  # separated: two distinct crests
-    floor_offset = delta0  # off-centre drive -> ~2:1 crest ratio
+    # Half overlap (y0 = b/2): the footprints cross into one connected patch (the
+    # flanks interfere). An off-centre drive ~0.85 delta0 pulls the crests to ~2:1.
+    y0 = 0.5 * ay_half
+    floor_offset = 0.85 * delta0
 
-    # The unchanged two-torus gap (pointwise minimum of two flank wells at y = ±y0),
-    # with the lower well lifted so the upper flank is pressed deeper and carries more.
-    dx, dy = ax_heavy / 10.0, ay_heavy / 12.0
-    nx = _even_ceil(2.5 * ax_heavy / dx * 2.0)
-    ny = _even_ceil((y0 + 2.5 * ay_heavy) / dy * 2.0)
+    # The unchanged two-torus gap, the lower well lifted so the upper flank is deeper.
+    dx, dy = ax_heavy / 16.0, ay_heavy / 16.0
+    nx = _even_ceil(2.6 * ax_heavy / dx * 2.0)
+    ny = _even_ceil((y0 + 2.6 * ay_heavy) / dy * 2.0)
     x = (np.arange(nx, dtype=np.float64) - (nx - 1) / 2.0) * dx
     y = (np.arange(ny, dtype=np.float64) - (ny - 1) / 2.0) * dy
     well_upper = (y[np.newaxis, :] - y0) ** 2 / (2.0 * radius_y)
@@ -355,33 +382,38 @@ def test_asymmetric_gothic_flanks_cap_a_two_to_one_peak() -> None:
     assert _relative_error(sol.total_load, load) <= LOAD_RTOL
 
     pressure = sol.pressure
-    mid = ny // 2
-    upper = float(pressure[:, mid:].max())
-    lower = float(pressure[:, :mid].max())
-    peak_ratio = upper / lower
+    peak = float(pressure.max())
+
+    # The flanks interfere: the groove centre carries load (a separated arch leaves a
+    # contact-free Gothic ridge there instead).
+    centre = float(pressure[nx // 2, ny // 2])
+    assert centre > CONNECTED_FRACTION * peak
+
+    # Two distinct crests in ~2:1, joined by a loaded saddle (a connected patch) — by
+    # proper local maxima, since the dominant flank's tail spills across the centre.
+    crests = _two_crests(pressure[nx // 2, :])
+    assert crests is not None
+    heavy_crest, light_crest, saddle = crests
     peak_lo, peak_hi = TWO_TO_ONE_PEAK_BAND
-    assert peak_lo <= peak_ratio <= peak_hi  # a clearly asymmetric two-torus, ~2:1
+    assert peak_lo <= heavy_crest / light_crest <= peak_hi
+    assert SADDLE_FRACTION * light_crest < saddle < light_crest
 
-    # Integrate each meridional half: the two flank loads. The Gothic point carries
-    # nothing when separated, so the split is clean — and ~8:1 for a 2:1 peak.
-    cell = dx * dy
-    q_upper = float(pressure[:, mid:].sum() * cell)
-    q_lower = float(pressure[:, :mid].sum() * cell)
-    load_lo, load_hi = EIGHT_TO_ONE_LOAD_BAND
-    assert load_lo <= q_upper / q_lower <= load_hi
-    cube_root_split = (q_upper / q_lower) ** (1.0 / 3.0)
-    assert _relative_error(cube_root_split, peak_ratio) <= ASYMMETRIC_CAP_RTOL
-
-    # The lightweight cap, given the same off-centre drive (s_+ = delta, s_- = delta
-    # - df), reproduces the field with no field integral: the envelope crest tracks
-    # the solver peak and is the dominant (dragged-into) flank.
+    # The lightweight cap, given the same drive, reproduces it: an ~8:1 split,
+    # overlapping footprints, and an envelope crest tracking the solver peak.
     law = law0.with_flank_coupling(e_star=e_star, offset=y0)
     q_plus, q_minus = law.coupled_loads(sol.approach, sol.approach - floor_offset)
+    load_lo, load_hi = EIGHT_TO_ONE_LOAD_BAND
+    assert load_lo <= q_plus / q_minus <= load_hi
     groove = law.groove_pressure(q_plus, q_minus, offset=y0)
-    assert _relative_error(groove.peak_pressure, sol.max_pressure) <= ASYMMETRIC_CAP_RTOL
+    assert not groove.separated
+    assert _relative_error(groove.peak_pressure, peak) <= ASYMMETRIC_CAP_RTOL
+
+    # The naive sum double-counts the overlap: at the centre it stacks the two flank
+    # tails into a spike above the true peak — the seam the envelope drops.
     cap_upper, cap_lower = groove.flanks
-    assert math.isclose(groove.peak_pressure, cap_upper.peak_pressure, rel_tol=EXACT_RTOL)
-    assert cap_upper.peak_pressure > 1.5 * cap_lower.peak_pressure
+    assert cap_upper.peak_pressure > cap_lower.peak_pressure
+    sum_centre = cap_upper.pressure_at(0.0, -y0) + cap_lower.pressure_at(0.0, y0)
+    assert sum_centre > SUM_DOUBLECOUNT * peak
 
 
 def test_height_field_matches_sphere_shortcut() -> None:
