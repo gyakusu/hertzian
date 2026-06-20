@@ -159,6 +159,17 @@ $\eta$ と分割は Rust のシナリオテスト
 `gothic_coupling_captures_the_load_split`）で固定しています。重心が外側へずれることは
 `gothic_overlap_shifts_the_load_centroid_outboard` で固定しています。
 
+### パイプラインとしての利用 — `calibrate` と `describe()`
+
+上の較正と検証は、図を描く [`scripts/fit_reduced_law.py`](../scripts/fit_reduced_law.py) だけでなく、
+プログラムから数行で実行できます。`hertzian.calibrate(spec)` が物理形状（[`GrooveSpec`](../python/hertzian/calibration.py)）
+を係数に還元して純粋関数の法則に差し込み、既定で場ソルバに対する**自己検証**を走らせます。
+`cal.describe()` がその確認レポート（指数・$R^2$・解析 $K$ との一致・有効フランク数 $\eta$・力評価の
+速度比）を返します。代表例（README のギャラリー溝）では、指数 **1.5000**・$R^2 = 1.000000$・
+解析 $K$ と 0.2 % 一致・$\eta$ の一致 0.1 %・場ソルバ比で約 10⁵ 倍の速度が得られ、**精度と速度の
+両立**が一目で確認できます。使い方は [README](../README.md) の「較正パイプライン」の節、固定は
+Python テスト [`tests/test_calibration.py`](../tests/test_calibration.py) を参照してください。
+
 ---
 
 ## 面圧キャップの検証

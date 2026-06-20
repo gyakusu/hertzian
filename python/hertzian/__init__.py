@@ -19,6 +19,12 @@ Three layers are offered (design §8.5):
   and ``groove_pressure(...)`` the whole-groove :class:`GrooveContactPressure`
   envelope of both flanks -- the Coulomb-friction cap ``|tau| <= mu p`` a tangential
   model rides under.
+* A **calibration pipeline**, :func:`calibrate`, turning a physical
+  :class:`GrooveSpec` (ball/tube/centre radii, shim offset, modulus) into a
+  ready-to-use :class:`GothicArchLaw` in one call -- deriving the coefficients,
+  inserting them into the pure-function core, and (by default) verifying the result
+  against the field solver. The returned :class:`Calibration` carries a
+  ``describe()`` report of the coefficients, accuracy and speed-up.
 
 The solver layers return a :class:`Solution` carrying the converged pressure field
 (as a zero-copy NumPy array) and the derived contact quantities.
@@ -48,14 +54,26 @@ from hertzian._core import (
     solve_sphere_on_sphere,
     solve_sphere_on_torus,
 )
+from hertzian.calibration import (
+    Calibration,
+    FlankReduction,
+    GrooveSpec,
+    SolverVerification,
+    calibrate,
+)
 
 __all__ = [
+    "Calibration",
     "Diagnostics",
     "FlankPressure",
+    "FlankReduction",
     "GothicArchLaw",
     "GrooveContactPressure",
+    "GrooveSpec",
     "Solution",
+    "SolverVerification",
     "__version__",
+    "calibrate",
     "contact_half_angle",
     "solve_height_field",
     "solve_sphere_in_gothic_arch",
