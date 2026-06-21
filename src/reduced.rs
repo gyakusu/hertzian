@@ -160,6 +160,21 @@
 //! `μ (Q_+ + Q_-)` from the loads). Redistributing that lens — the single-patch
 //! coalescence onto the single arch, whose one merged contact would carry `2Q` at the
 //! deeper peak `c_p (2Q)^{1/3}` — is the same next stage as the `η → 1` blend.
+//!
+//! # Meshing the cap for a Coulomb solver
+//!
+//! A discrete friction solver does not sample `p` point by point; it meshes the
+//! contact into cells and works with each cell's centre and the normal load it
+//! bears. [`FlankPressure::pressure_mesh`] and [`GrooveContactPressure::pressure_mesh`]
+//! do exactly that: they tile the footprint's bounding box with an `nx × ny` lattice
+//! of equal cells and return the [`PressureMesh`] — the cell-centre coordinates, the
+//! cap pressure sampled there, and the midpoint-rule per-cell force `ΔP = p · ΔA`.
+//! That per-cell force is the lumped normal load a node carries, so `μ ΔP` is its
+//! tangential-traction cap and the cells sum to the contact load (the per-flank `Q`
+//! exactly in the fine-mesh limit), handing a Coulomb model the `(centre, normal
+//! load)` lattice it integrates the friction — force and torque — over.
+
+use ndarray::{Array2, ArrayView2};
 
 use crate::validation::HertzElliptic;
 
@@ -636,6 +651,25 @@ impl FlankPressure {
         );
         mu * self.pressure_at(x, y)
     }
+
+    /// Samples the footprint onto an `nx × ny` cell mesh — centres and per-cell load.
+    ///
+    /// Tiles the footprint's bounding box `[-a_x, a_x] × [-a_y, a_y]` with `nx × ny`
+    /// equal cells and returns the [`PressureMesh`]: each cell's centre, the cap
+    /// pressure there, and the integrated normal force `p · ΔA` it bears — what a
+    /// Coulomb-friction model meshes the flank into, capping the local tangential
+    /// traction at `μ ΔP`. The per-cell forces sum to the flank load `Q` in the
+    /// fine-mesh limit ([`PressureMesh::total_force`]); a lifted-off flank (zero
+    /// footprint) gives an all-zero mesh of the requested shape.
+    ///
+    /// # Panics
+    /// Panics if `nx` or `ny` is zero.
+    #[must_use]
+    pub fn pressure_mesh(&self, nx: usize, ny: usize) -> PressureMesh {
+        PressureMesh::build(nx, ny, self.semi_axis_x, self.semi_axis_y, |x, y| {
+            self.pressure_at(x, y)
+        })
+    }
 }
 
 /// The connected two-flank groove contact cap — the envelope of two footprints.
@@ -735,6 +769,144 @@ impl GrooveContactPressure {
             "friction coefficient must be non-negative and finite",
         );
         mu * self.pressure_at(x, y)
+    }
+
+    /// Samples the groove envelope onto an `nx × ny` cell mesh — centres and per-cell load.
+    ///
+    /// Tiles the connected contact's bounding box — circumferential `[-a_x, a_x]` and
+    /// meridional `[-(y0 + a_y), y0 + a_y]`, the larger flank setting each half-extent
+    /// so an asymmetric or one-flank drive is still spanned — with `nx × ny` equal
+    /// cells, and returns the [`PressureMesh`] of cell centres, envelope pressure, and
+    /// per-cell normal force `p · ΔA`. This is what a Coulomb model meshes the whole
+    /// groove contact into, capping the local traction at `μ ΔP`. The per-cell forces
+    /// sum to the meshed load ([`PressureMesh::total_force`]): the per-flank sum
+    /// `Q_+ + Q_-` where the footprints are disjoint, a little under it where the
+    /// envelope drops the overlap lens (the per-flank loads stay exact via
+    /// [`GrooveContactPressure::flanks`]).
+    ///
+    /// # Panics
+    /// Panics if `nx` or `ny` is zero.
+    #[must_use]
+    pub fn pressure_mesh(&self, nx: usize, ny: usize) -> PressureMesh {
+        let (ax_upper, ay_upper) = self.upper.semi_axes();
+        let (ax_lower, ay_lower) = self.lower.semi_axes();
+        let half_x = ax_upper.max(ax_lower);
+        let half_y = self.offset + ay_upper.max(ay_lower);
+        PressureMesh::build(nx, ny, half_x, half_y, |x, y| self.pressure_at(x, y))
+    }
+}
+
+/// A regular-grid sampling of a pressure cap — cell centres and per-cell load.
+///
+/// What a Coulomb-friction model meshes a contact into (see the [module
+/// docs](self#meshing-the-cap-for-a-coulomb-solver)). The footprint's bounding box is
+/// tiled by an `nx × ny` lattice of equal rectangular cells, and each cell carries
+/// three things: its centre coordinate `(x_i, y_j)`, the cap pressure sampled there
+/// `p(x_i, y_j)`, and the **integrated normal force** it bears — the midpoint-rule
+/// `ΔP_ij = p(x_i, y_j) · ΔA`, with `ΔA = dx · dy`. The per-cell force is the lumped
+/// normal load at a node, so `μ ΔP_ij` is the local tangential-traction cap there and
+/// the forces sum to the contact load — exactly in the fine-mesh limit, with the
+/// discrete sum reported by [`PressureMesh::total_force`] (a coarse mesh runs a little
+/// under, from rim cells the half-ellipsoid only partly fills). Built by
+/// [`FlankPressure::pressure_mesh`] and [`GrooveContactPressure::pressure_mesh`].
+///
+/// The cells tile `[-half_x, half_x] × [-half_y, half_y]` exactly, so the centres are
+/// `x_i = (i + ½) dx − half_x` — the same origin-centred convention as the solver
+/// [`Grid`](crate::grid::Grid), so a meshed cap lines up cell-for-cell with a field
+/// solve on the matching domain. A fully lifted-off footprint has a zero bounding box
+/// and yields an all-zero mesh of the requested shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PressureMesh {
+    x_centers: Vec<f64>,
+    y_centers: Vec<f64>,
+    pressure: Array2<f64>,
+    cell_area: f64,
+}
+
+impl PressureMesh {
+    /// Tiles `[-half_x, half_x] × [-half_y, half_y]` with `nx × ny` cells, sampling
+    /// `cap` at each centre.
+    ///
+    /// # Panics
+    /// Panics if `nx` or `ny` is zero (an empty mesh carries no cells).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "mesh dimensions are tiny relative to f64's 53-bit integer range"
+    )]
+    fn build<F>(nx: usize, ny: usize, half_x: f64, half_y: f64, cap: F) -> Self
+    where
+        F: Fn(f64, f64) -> f64,
+    {
+        assert!(
+            nx > 0 && ny > 0,
+            "pressure mesh dimensions must be non-zero"
+        );
+        // `n` cells tiling [-h, h]: width 2h, cell size 2h/n, centre `i` at
+        // (i + ½)·d − h — the origin-centred cell-centre convention of the solver
+        // Grid. A lifted-off footprint has h = 0, so every centre collapses to the
+        // origin where the cap is zero, filling an all-zero mesh — no division, no
+        // panic.
+        let dx = 2.0 * half_x / nx as f64;
+        let dy = 2.0 * half_y / ny as f64;
+        let x_centers: Vec<f64> = (0..nx).map(|i| (i as f64 + 0.5) * dx - half_x).collect();
+        let y_centers: Vec<f64> = (0..ny).map(|j| (j as f64 + 0.5) * dy - half_y).collect();
+        let pressure = Array2::from_shape_fn((nx, ny), |(i, j)| cap(x_centers[i], y_centers[j]));
+        Self {
+            x_centers,
+            y_centers,
+            pressure,
+            cell_area: dx * dy,
+        }
+    }
+
+    /// The cell-centre `x` coordinates, length `nx` (metres).
+    #[must_use]
+    pub fn x_centers(&self) -> &[f64] {
+        &self.x_centers
+    }
+
+    /// The cell-centre `y` coordinates, length `ny` (metres).
+    #[must_use]
+    pub fn y_centers(&self) -> &[f64] {
+        &self.y_centers
+    }
+
+    /// The cell-centre cap pressure field `p(x_i, y_j)`, shape `(nx, ny)` (pascals).
+    #[must_use]
+    pub fn pressure(&self) -> ArrayView2<'_, f64> {
+        self.pressure.view()
+    }
+
+    /// The per-cell integrated normal force `ΔP_ij = p(x_i, y_j) · ΔA`, shape
+    /// `(nx, ny)` (newtons).
+    ///
+    /// The lumped load each cell bears; a Coulomb model caps the local tangential
+    /// traction at `μ ΔP_ij`, and the field sums to [`PressureMesh::total_force`].
+    #[must_use]
+    pub fn force(&self) -> Array2<f64> {
+        self.pressure.mapv(|p| p * self.cell_area)
+    }
+
+    /// A single cell's area `ΔA = dx · dy` (square metres).
+    #[must_use]
+    pub const fn cell_area(&self) -> f64 {
+        self.cell_area
+    }
+
+    /// The discrete sum of the per-cell forces (newtons) — the meshed contact load.
+    ///
+    /// The midpoint quadrature of the cap over its footprint; it approaches the exact
+    /// contact load as the mesh refines (a coarse mesh runs a little under, from the
+    /// rim cells the half-ellipsoid only partly fills).
+    #[must_use]
+    pub fn total_force(&self) -> f64 {
+        self.pressure.sum() * self.cell_area
+    }
+
+    /// The mesh shape `(nx, ny)`.
+    #[must_use]
+    pub fn dims(&self) -> (usize, usize) {
+        self.pressure.dim()
     }
 }
 
@@ -1525,5 +1697,164 @@ mod tests {
     #[should_panic(expected = "flank offset")]
     fn groove_pressure_rejects_a_negative_offset() {
         let _ = sample_law().groove_pressure(100.0, 100.0, -1.0e-3);
+    }
+
+    // --- meshing the cap for a Coulomb solver ------------------------------ #
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "mesh dimensions are tiny relative to f64's 53-bit integer range"
+    )]
+    fn flank_pressure_mesh_centres_tile_the_footprint() {
+        // The mesh tiles the footprint's bounding box [-a_x, a_x] × [-a_y, a_y] with
+        // origin-centred cells: the centres sit half a cell inside the box, are
+        // symmetric about the origin, and the cell area is the spacings' product.
+        let footprint = sample_law().flank_pressure(150.0).expect("footprint");
+        let (a_x, a_y) = footprint.semi_axes();
+        let (nx, ny) = (16_usize, 24_usize);
+        let mesh = footprint.pressure_mesh(nx, ny);
+
+        assert_eq!(mesh.dims(), (nx, ny));
+        assert_eq!(mesh.x_centers().len(), nx);
+        assert_eq!(mesh.y_centers().len(), ny);
+
+        let dx = 2.0 * a_x / nx as f64;
+        let dy = 2.0 * a_y / ny as f64;
+        assert_close(mesh.cell_area(), dx * dy, 1.0e-12, "cell area = dx·dy");
+        assert_close(
+            mesh.x_centers()[0],
+            -a_x + 0.5 * dx,
+            1.0e-12,
+            "first x centre",
+        );
+        assert_close(
+            mesh.x_centers()[nx - 1],
+            a_x - 0.5 * dx,
+            1.0e-12,
+            "last x centre",
+        );
+        assert!(
+            (mesh.x_centers()[0] + mesh.x_centers()[nx - 1]).abs() <= 1.0e-18,
+            "x centres are symmetric about the origin",
+        );
+        assert!(
+            (mesh.y_centers()[0] + mesh.y_centers()[ny - 1]).abs() <= 1.0e-18,
+            "y centres are symmetric about the origin",
+        );
+    }
+
+    #[test]
+    fn flank_pressure_mesh_force_is_pressure_times_area_and_sums_to_the_load() {
+        // The per-cell force is the midpoint integral p·ΔA, so it is the sampled
+        // pressure field scaled by the cell area, and the whole mesh integrates to
+        // the flank load (the same midpoint quadrature the footprint passes elsewhere).
+        let load = 150.0;
+        let footprint = sample_law().flank_pressure(load).expect("footprint");
+        let mesh = footprint.pressure_mesh(220, 220);
+
+        let pressure = mesh.pressure();
+        let force = mesh.force();
+        let (i, j) = (140, 90);
+        // A sampled centre matches a direct pressure_at evaluation.
+        assert_close(
+            pressure[(i, j)],
+            footprint.pressure_at(mesh.x_centers()[i], mesh.y_centers()[j]),
+            1.0e-12,
+            "mesh pressure is pressure_at the cell centre",
+        );
+        // Force is the pressure field times the cell area, cell for cell.
+        assert_close(
+            force[(i, j)],
+            pressure[(i, j)] * mesh.cell_area(),
+            1.0e-12,
+            "force = p · ΔA",
+        );
+        // The midpoint quadrature recovers the flank load and matches total_force.
+        assert_close(
+            force.sum(),
+            mesh.total_force(),
+            1.0e-12,
+            "Σ force = total_force",
+        );
+        assert_close(mesh.total_force(), load, 2.0e-3, "Σ p·ΔA ≈ Q");
+    }
+
+    #[test]
+    fn a_lifted_off_flank_meshes_to_zeros() {
+        // A separated flank has a zero footprint, so its mesh is all-zero forces of
+        // the requested shape — it composes with the C¹ lift-off, capping at zero.
+        let footprint = sample_law().flank_pressure(0.0).expect("footprint");
+        let mesh = footprint.pressure_mesh(8, 8);
+        assert_eq!(mesh.dims(), (8, 8));
+        assert!(mesh.total_force() == 0.0, "no load");
+        assert!(mesh.force().iter().all(|&f| f == 0.0), "all-zero force");
+        assert!(
+            mesh.cell_area() == 0.0,
+            "degenerate footprint has zero cell area"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "mesh dimensions are tiny relative to f64's 53-bit integer range"
+    )]
+    fn groove_pressure_mesh_spans_both_flanks_and_sums_to_the_loads_when_separated() {
+        // The groove mesh spans both flanks at ±y0, and where they are disjoint the
+        // envelope is the per-flank sum, so the midpoint quadrature recovers Q_+ + Q_-.
+        let law = sample_law();
+        let load = 120.0;
+        let footprint = law.flank_pressure(load).expect("footprint");
+        let (_, a_y) = footprint.semi_axes();
+        let offset = 1.2 * a_y; // 2·offset > a_y + a_y: disjoint
+        let groove = law.groove_pressure(load, load, offset).expect("groove");
+        assert!(groove.separated(), "offset must separate the footprints");
+
+        let (nx, ny) = (64_usize, 220_usize);
+        let mesh = groove.pressure_mesh(nx, ny);
+        assert_eq!(mesh.dims(), (nx, ny));
+        // The meridional extent reaches both flank rims at ±(offset + a_y).
+        let half_y = offset + a_y;
+        let dy = 2.0 * half_y / ny as f64;
+        assert_close(
+            mesh.y_centers()[ny - 1],
+            half_y - 0.5 * dy,
+            1.0e-12,
+            "meridional extent spans both flanks at ±(y0 + a_y)",
+        );
+        // Two disjoint half-ellipsoids each carrying `load`: Σ p·ΔA ≈ 2 load.
+        assert_close(mesh.total_force(), 2.0 * load, 3.0e-3, "Σ ≈ Q_+ + Q_-");
+    }
+
+    #[test]
+    fn groove_pressure_mesh_runs_under_the_load_sum_in_overlap() {
+        // In the half-overlap the envelope drops the seam double-count, so its
+        // integral runs a little under Q_+ + Q_-: the meshed load is below the
+        // per-flank sum yet still close (the per-flank loads themselves stay exact).
+        let law = sample_law();
+        let load = 120.0;
+        let footprint = law.flank_pressure(load).expect("footprint");
+        let (_, a_y) = footprint.semi_axes();
+        let offset = 0.5 * a_y; // half overlap: the footprints cross
+        let groove = law.groove_pressure(load, load, offset).expect("groove");
+        assert!(!groove.separated(), "offset must overlap the footprints");
+
+        let mesh = groove.pressure_mesh(80, 200);
+        let one_flank = load; // the heavier flank alone
+        let sum = 2.0 * load; // the per-flank sum (the naive double-count)
+        assert!(
+            mesh.total_force() < sum && mesh.total_force() > 0.5 * (one_flank + sum),
+            "envelope mesh runs under the load sum but well above one flank: {} \
+             (one flank {one_flank}, sum {sum})",
+            mesh.total_force(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "pressure mesh dimensions")]
+    fn pressure_mesh_rejects_a_zero_dimension() {
+        let footprint = sample_law().flank_pressure(50.0).expect("footprint");
+        let _ = footprint.pressure_mesh(0, 8);
     }
 }
