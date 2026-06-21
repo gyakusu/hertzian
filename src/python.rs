@@ -19,7 +19,7 @@
 use core::f64::consts::FRAC_PI_2;
 
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
@@ -29,6 +29,7 @@ use crate::material::Material;
 use crate::reduced::{
     contact_half_angle as core_contact_half_angle, FlankPressure as CoreFlankPressure,
     GothicArchLaw as CoreLaw, GrooveContactPressure as CoreGroovePressure,
+    PressureMesh as CorePressureMesh,
 };
 use crate::scenarios::{
     solve_sampled_gap, sphere_in_gothic_arch, sphere_on_flat, sphere_on_sphere, sphere_on_torus,
@@ -47,6 +48,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<GothicArchLaw>()?;
     module.add_class::<FlankPressure>()?;
     module.add_class::<GrooveContactPressure>()?;
+    module.add_class::<PressureMesh>()?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_flat, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_sphere, module)?)?;
     module.add_function(wrap_pyfunction!(solve_sphere_on_torus, module)?)?;
@@ -423,6 +425,22 @@ impl FlankPressure {
         Ok(self.inner.traction_bound(mu, x, y))
     }
 
+    /// Sample the footprint onto an `nx * ny` cell mesh — centres and per-cell load.
+    ///
+    /// Tiles the footprint's bounding box `[-a_x, a_x] x [-a_y, a_y]` and returns the
+    /// [`PressureMesh`]: the cell-centre coordinates ``x`` / ``y``, the cap
+    /// ``pressure`` sampled there, and the per-cell normal ``force`` `p * dA` a
+    /// Coulomb model caps the local traction at (`mu * force`). The forces sum to the
+    /// flank load (``total_force``); a lifted-off flank gives an all-zero mesh. Raises
+    /// ``ValueError`` if `nx` or `ny` is not a positive integer.
+    fn pressure_mesh(&self, nx: usize, ny: usize) -> PyResult<PressureMesh> {
+        require_dim(nx, "nx")?;
+        require_dim(ny, "ny")?;
+        Ok(PressureMesh {
+            inner: self.inner.pressure_mesh(nx, ny),
+        })
+    }
+
     fn __repr__(&self) -> String {
         let (a_x, a_y) = self.inner.semi_axes();
         format!(
@@ -493,12 +511,108 @@ impl GrooveContactPressure {
         Ok(self.inner.traction_bound(mu, x, y))
     }
 
+    /// Sample the groove envelope onto an `nx * ny` cell mesh — centres and per-cell load.
+    ///
+    /// Tiles the connected contact's bounding box (circumferential `[-a_x, a_x]` and
+    /// meridional `[-(y0 + a_y), y0 + a_y]`, spanning both flanks at `±y0`) and returns
+    /// the [`PressureMesh`]: the cell-centre coordinates ``x`` / ``y``, the envelope
+    /// ``pressure`` there, and the per-cell normal ``force`` `p * dA` a Coulomb model
+    /// caps the whole-groove traction at (`mu * force`). The forces sum to the meshed
+    /// load (``total_force``) — the per-flank sum where the footprints are disjoint, a
+    /// little under it where the envelope drops the overlap lens. Raises ``ValueError``
+    /// if `nx` or `ny` is not a positive integer.
+    fn pressure_mesh(&self, nx: usize, ny: usize) -> PyResult<PressureMesh> {
+        require_dim(nx, "nx")?;
+        require_dim(ny, "ny")?;
+        Ok(PressureMesh {
+            inner: self.inner.pressure_mesh(nx, ny),
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "GrooveContactPressure(peak_pressure={:.6e}, offset={:.6e}, separated={})",
             self.inner.peak_pressure(),
             self.inner.offset(),
             py_bool(self.inner.separated()),
+        )
+    }
+}
+
+/// A regular-grid sampling of a pressure cap — cell centres and per-cell load.
+///
+/// What a Coulomb-friction model meshes a contact into. The footprint's bounding box
+/// is tiled by an `nx * ny` lattice of equal rectangular cells; each cell carries its
+/// centre coordinate, the cap pressure sampled there, and the integrated normal force
+/// `ΔP = p * ΔA` it bears (the midpoint-rule cell load). `mu * force` is then the
+/// per-cell tangential-traction cap, and the forces sum to the contact load
+/// (``total_force``; exact in the fine-mesh limit). Built by
+/// [`FlankPressure.pressure_mesh`] / [`GrooveContactPressure.pressure_mesh`].
+/// Immutable from Python.
+#[pyclass(name = "PressureMesh", module = "hertzian._core", frozen)]
+struct PressureMesh {
+    inner: CorePressureMesh,
+}
+
+#[pymethods]
+impl PressureMesh {
+    /// Cell-centre `x` coordinates, shape `(nx,)` (metres).
+    #[getter]
+    fn x<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_slice(py, self.inner.x_centers())
+    }
+
+    /// Cell-centre `y` coordinates, shape `(ny,)` (metres).
+    #[getter]
+    fn y<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_slice(py, self.inner.y_centers())
+    }
+
+    /// Cell-centre cap pressure field `p(x_i, y_j)`, shape `(nx, ny)` (pascals).
+    ///
+    /// A fresh, C-contiguous array; axis 0 is `x`, axis 1 is `y` — the same layout as
+    /// [`Solution.pressure`], so a meshed cap aligns cell-for-cell with a field solve.
+    #[getter]
+    fn pressure<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        self.inner.pressure().to_owned().into_pyarray(py)
+    }
+
+    /// Per-cell integrated normal force `ΔP = p * ΔA`, shape `(nx, ny)` (newtons).
+    ///
+    /// The lumped load each cell bears: `mu * force` is its Coulomb traction cap, and
+    /// the field sums to ``total_force``.
+    #[getter]
+    fn force<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        self.inner.force().into_pyarray(py)
+    }
+
+    /// A single cell's area `ΔA = dx * dy` (square metres).
+    #[getter]
+    const fn cell_area(&self) -> f64 {
+        self.inner.cell_area()
+    }
+
+    /// Mesh shape `(nx, ny)`.
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        self.inner.dims()
+    }
+
+    /// Discrete sum of the per-cell forces (newtons) — the meshed contact load.
+    ///
+    /// The midpoint quadrature of the cap; it approaches the exact contact load as the
+    /// mesh refines (a coarse mesh runs a little under).
+    #[getter]
+    fn total_force(&self) -> f64 {
+        self.inner.total_force()
+    }
+
+    fn __repr__(&self) -> String {
+        let (nx, ny) = self.inner.dims();
+        format!(
+            "PressureMesh(shape=({nx}, {ny}), cell_area={:.6e}, total_force={:.6e})",
+            self.inner.cell_area(),
+            self.inner.total_force(),
         )
     }
 }

@@ -18,7 +18,9 @@ Three layers are offered (design §8.5):
   ``flank_pressure(load)`` returns the per-flank :class:`FlankPressure` footprint,
   and ``groove_pressure(...)`` the whole-groove :class:`GrooveContactPressure`
   envelope of both flanks -- the Coulomb-friction cap ``|tau| <= mu p`` a tangential
-  model rides under.
+  model rides under. Either footprint's ``pressure_mesh(nx, ny)`` discretises that cap
+  into a :class:`PressureMesh` of cell-centre coordinates and per-cell normal loads --
+  the ``(centre, normal load)`` lattice a discrete Coulomb solver integrates over.
 * A **calibration pipeline**, :func:`calibrate`, turning a physical
   :class:`GrooveSpec` (ball/tube/centre radii, shim offset, modulus) into a
   ready-to-use :class:`GothicArchLaw` in one call -- deriving the coefficients,
@@ -45,6 +47,7 @@ from hertzian._core import (
     FlankPressure,
     GothicArchLaw,
     GrooveContactPressure,
+    PressureMesh,
     Solution,
     __version__,
     contact_half_angle,
@@ -70,6 +73,7 @@ __all__ = [
     "GothicArchLaw",
     "GrooveContactPressure",
     "GrooveSpec",
+    "PressureMesh",
     "Solution",
     "SolverVerification",
     "__version__",

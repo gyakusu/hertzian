@@ -380,3 +380,112 @@ def test_groove_pressure_requires_a_calibrated_shape() -> None:
         _law().groove_pressure(100.0, 100.0, offset=-1.0e-3)
     with pytest.raises(ValueError, match="mu"):
         _law().groove_pressure(100.0, 100.0, offset=0.4e-3).traction_bound(-0.1, 0.0, 0.0)
+
+
+# --- meshing the cap for a Coulomb solver ------------------------------------
+
+# A moderately fine mesh: the midpoint quadrature recovers the load to ~1e-3.
+MESH_RTOL = 3e-3
+
+
+def test_pressure_mesh_centres_tile_the_footprint() -> None:
+    """The mesh tiles ``[-a_x, a_x] x [-a_y, a_y]`` with origin-centred cells."""
+    cap = _law().flank_pressure(150.0)
+    a_x, a_y = cap.semi_axes
+    nx, ny = 16, 24
+    mesh = cap.pressure_mesh(nx, ny)
+
+    assert mesh.shape == (nx, ny)
+    assert mesh.x.shape == (nx,)
+    assert mesh.y.shape == (ny,)
+
+    dx, dy = 2.0 * a_x / nx, 2.0 * a_y / ny
+    assert math.isclose(mesh.cell_area, dx * dy, rel_tol=EXACT_RTOL)
+    # Centres sit half a cell inside the box and are symmetric about the origin.
+    assert math.isclose(mesh.x[0], -a_x + 0.5 * dx, rel_tol=EXACT_RTOL)
+    assert math.isclose(mesh.x[-1], a_x - 0.5 * dx, rel_tol=EXACT_RTOL)
+    assert abs(mesh.x[0] + mesh.x[-1]) <= ZERO_TOL
+    assert abs(mesh.y[0] + mesh.y[-1]) <= ZERO_TOL
+
+
+def test_pressure_mesh_force_is_pressure_times_area_and_sums_to_the_load() -> None:
+    """Per-cell force is ``p . dA``; the mesh integrates to the flank load."""
+    load = 150.0
+    cap = _law().flank_pressure(load)
+    mesh = cap.pressure_mesh(200, 200)
+
+    # The force field is the sampled pressure scaled by the cell area, cell for cell.
+    assert np.allclose(mesh.force, mesh.pressure * mesh.cell_area, rtol=EXACT_RTOL)
+    # A sampled centre matches a direct pressure_at evaluation.
+    assert math.isclose(
+        float(mesh.pressure[140, 90]),
+        cap.pressure_at(float(mesh.x[140]), float(mesh.y[90])),
+        rel_tol=EXACT_RTOL,
+    )
+    # The midpoint quadrature recovers the flank load, and total_force is its sum.
+    assert math.isclose(float(mesh.force.sum()), mesh.total_force, rel_tol=EXACT_RTOL)
+    assert math.isclose(mesh.total_force, load, rel_tol=MESH_RTOL)
+
+
+def test_pressure_mesh_feeds_the_coulomb_friction_cap() -> None:
+    """``mu * force`` is the per-cell tangential cap; it sums to the sliding ``mu Q``."""
+    load = 150.0
+    cap = _law().flank_pressure(load)
+    mesh = cap.pressure_mesh(200, 200)
+    traction_cap = MU * mesh.force  # per-cell |dF_t| bound (N)
+    assert math.isclose(float(traction_cap.sum()), MU * mesh.total_force, rel_tol=EXACT_RTOL)
+    assert math.isclose(float(traction_cap.sum()), MU * load, rel_tol=MESH_RTOL)
+
+
+def test_groove_pressure_mesh_spans_both_flanks_and_sums_to_the_loads() -> None:
+    """The groove mesh spans both flanks at +/-y0; separated, it sums to Q_+ + Q_-."""
+    law = _law()
+    load = 120.0
+    cap = law.flank_pressure(load)
+    _, a_y = cap.semi_axes
+    offset = 1.2 * a_y  # disjoint footprints
+    groove = law.groove_pressure(load, load, offset=offset)
+    assert groove.separated
+
+    nx, ny = 64, 220
+    mesh = groove.pressure_mesh(nx, ny)
+    assert mesh.shape == (nx, ny)
+    # The meridional extent reaches both flank rims at +/-(offset + a_y).
+    half_y = offset + a_y
+    dy = 2.0 * half_y / ny
+    assert math.isclose(float(mesh.y[-1]), half_y - 0.5 * dy, rel_tol=EXACT_RTOL)
+    # Two disjoint half-ellipsoids, each carrying `load`.
+    assert math.isclose(mesh.total_force, 2.0 * load, rel_tol=MESH_RTOL)
+
+
+def test_groove_pressure_mesh_runs_under_the_load_sum_in_overlap() -> None:
+    """In the half-overlap the envelope drops the seam lens, so Sigma runs under the sum."""
+    law = _law()
+    load = 120.0
+    cap = law.flank_pressure(load)
+    _, a_y = cap.semi_axes
+    groove = law.groove_pressure(load, load, offset=0.5 * a_y)  # half overlap
+    assert not groove.separated
+
+    mesh = groove.pressure_mesh(80, 200)
+    # Under the naive per-flank sum, yet well above a single flank's load.
+    assert load < mesh.total_force < 2.0 * load
+
+
+def test_lifted_off_flank_meshes_to_zero() -> None:
+    """A separated flank has a zero footprint, so every cell force is zero."""
+    mesh = _law().flank_pressure(0.0).pressure_mesh(8, 8)
+    assert mesh.shape == (8, 8)
+    assert mesh.total_force == 0.0
+    assert np.all(mesh.force == 0.0)
+    assert mesh.cell_area == 0.0
+
+
+def test_pressure_mesh_accepts_keywords_and_rejects_zero_dimensions() -> None:
+    """``nx``/``ny`` are usable by keyword and must be positive integers."""
+    cap = _law().flank_pressure(50.0)
+    assert cap.pressure_mesh(nx=12, ny=20).shape == (12, 20)
+    with pytest.raises(ValueError, match="nx"):
+        cap.pressure_mesh(0, 8)
+    with pytest.raises(ValueError, match="ny"):
+        cap.pressure_mesh(8, 0)
