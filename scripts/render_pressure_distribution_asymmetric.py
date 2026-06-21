@@ -39,7 +39,9 @@ Four panels, drawn from a handful of full solves:
   connected patch); the sum double-counts the overlap into a seam spike, while the
   envelope tracks the solver. The shaded band is the Coulomb cap ``mu p``.
 * **(C) The 2-D asymmetric Coulomb cap.** ``mu p(x, y)`` over the two *overlapping*,
-  unequal flank ellipses, with the solver's connected contact outline.
+  unequal flank ellipses, sampled straight off the cap with ``groove.pressure_mesh(nx,
+  ny)`` — the per-cell ``(centre, normal load)`` lattice a discrete Coulomb solver
+  meshes the contact into — with the solver's connected contact outline.
 * **(D) Interference across the shim.** Closing the shim from separated into overlap
   at the off-centre drive, the connected saddle rises; the naive sum's seam balloons
   with the overlap while the envelope follows the solver.
@@ -529,15 +531,14 @@ def _panel_traction_cap(ax: Axes, cut: OverlapCut) -> None:
     """Draw the 2-D Coulomb cap mu p(x, y) over the two overlapping flank ellipses."""
     solve = cut.solve
     upper, lower = cut.groove.flanks
-    axp, ayp = upper.semi_axes
-    span_x = 1.4 * axp
-    span_y = solve.y0 + 1.6 * ayp
-    xs = np.linspace(-span_x, span_x, 161)
-    ys = np.linspace(-span_y, span_y, 321)
-    gx, gy = np.meshgrid(xs, ys, indexing="ij")
-    field = np.array([[cut.groove.pressure_at(float(xx), float(yy)) for yy in ys] for xx in xs])
-    mesh = ax.pcolormesh(gx * MM, gy * MM, MU * field * GPA, cmap="magma", shading="auto")
-    plt.colorbar(mesh, ax=ax, label=r"$\mu\,p$ (GPa)", fraction=0.046, pad=0.04)
+    # The cap field comes straight off pressure_mesh: it tiles the connected footprint
+    # into nx*ny cells and hands back the cell centres (mesh.x, mesh.y) and the
+    # envelope pressure there — the lattice a discrete Coulomb solver meshes the
+    # contact into, no hand-rolled grid loop over pressure_at.
+    mesh = cut.groove.pressure_mesh(nx=161, ny=321)
+    gx, gy = np.meshgrid(mesh.x, mesh.y, indexing="ij")
+    field = ax.pcolormesh(gx * MM, gy * MM, MU * mesh.pressure * GPA, cmap="magma", shading="auto")
+    plt.colorbar(field, ax=ax, label=r"$\mu\,p$ (GPa)", fraction=0.046, pad=0.04)
 
     # The solver's connected contact outline (where its pressure clears the floor).
     ax.contour(

@@ -27,8 +27,10 @@ Four panels, drawn from a handful of full solves:
   connected saddle, within a few % of the solver). The shaded area is the Coulomb cap
   ``mu p`` a friction model rides under.
 * **(C) The 2-D Coulomb traction cap.** ``mu p(x, y)`` over the two (separated) flank
-  ellipses, with the solver's contact outline — the bound a tangential model integrates
-  to ``mu Q``.
+  ellipses, sampled straight off the cap with ``groove.pressure_mesh(nx, ny)`` — the
+  ``(cell centre, per-cell normal load)`` lattice a discrete Coulomb solver meshes the
+  contact into — with the solver's contact outline. The cells' normal loads sum to the
+  contact load, so the traction cap integrates to ``mu Q``.
 * **(D) Validity.** Envelope vs naive-sum peak against the solver as the shim closes: both
   exact where the footprints are *resolved* (``y0 >~ b``); in the overlap the sum
   over-counts the seam while the envelope tracks the solver, down to the deep merge left
@@ -399,10 +401,11 @@ def _panel_overlap_cut(ax: Axes, cut: OverlapCut) -> None:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class SeparatedCap:
-    """One separated solve plus the reconstructed per-flank caps."""
+    """One separated solve plus the whole-groove cap meshed onto a cell lattice."""
 
     y0: float
-    cap_plus: hertzian.FlankPressure
+    groove: hertzian.GrooveContactPressure
+    mesh: hertzian.PressureMesh
     q_plus: float
     load_integral: float
     pressure: NDArray[np.float64]
@@ -411,7 +414,7 @@ class SeparatedCap:
 
 
 def separated_cap() -> SeparatedCap:
-    """Solve the separated groove and reconstruct its per-flank pressure caps."""
+    """Solve the separated groove and mesh its whole-groove Coulomb cap."""
     sol, y0, dx, dy = solve_groove(SEPARATED_SHIM, LOAD, cells=CELLS_PER_SEMI_FINE)
     delta = sol.approach
     pressure = np.asarray(sol.pressure)
@@ -421,11 +424,16 @@ def separated_cap() -> SeparatedCap:
 
     law = LAW.with_flank_coupling(e_star=E_STAR, offset=y0)
     q_plus, q_minus = law.coupled_loads(delta, delta)
-    cap_plus = law.flank_pressure(q_plus)
-    cap_minus = law.flank_pressure(q_minus)
+    groove = law.groove_pressure(q_plus, q_minus, offset=y0)
+    cap_plus, cap_minus = groove.flanks
+    # Mesh the envelope cap onto a regular cell lattice — the (cell centre, per-cell
+    # normal load) grid a discrete Coulomb solver meshes the contact into. This is
+    # what the panel draws, instead of re-deriving the half-ellipsoid by hand.
+    mesh = groove.pressure_mesh(nx=160, ny=320)
     return SeparatedCap(
         y0=y0,
-        cap_plus=cap_plus,
+        groove=groove,
+        mesh=mesh,
         q_plus=q_plus,
         load_integral=cap_plus.load + cap_minus.load,
         pressure=pressure,
@@ -436,19 +444,14 @@ def separated_cap() -> SeparatedCap:
 
 def _panel_traction_cap(ax: Axes, cap: SeparatedCap) -> None:
     """Draw the 2-D Coulomb traction cap mu p(x, y) with the solver contact outline."""
-    axp, ayp = cap.cap_plus.semi_axes
-    span_x = 1.4 * axp
-    span_y = cap.y0 + 1.6 * ayp
-    xs = np.linspace(-span_x, span_x, 160)
-    ys = np.linspace(-span_y, span_y, 320)
-    gx, gy = np.meshgrid(xs, ys, indexing="ij")
-    p0 = cap.cap_plus.peak_pressure
-    upper = p0 * np.sqrt(np.clip(1.0 - (gx / axp) ** 2 - ((gy - cap.y0) / ayp) ** 2, 0.0, None))
-    lower = p0 * np.sqrt(np.clip(1.0 - (gx / axp) ** 2 - ((gy + cap.y0) / ayp) ** 2, 0.0, None))
-    # The envelope (pointwise max) — identical to the sum here (disjoint footprints).
-    field = np.maximum(upper, lower)
-    mesh = ax.pcolormesh(gx * MM, gy * MM, MU * field * GPA, cmap="magma", shading="auto")
-    plt.colorbar(mesh, ax=ax, label=r"$\mu\,p$ (GPa)", fraction=0.046, pad=0.04)
+    # The cap field comes straight off pressure_mesh: it tiles the groove footprint
+    # into nx*ny cells and hands back the cell centres (mesh.x, mesh.y) and the
+    # envelope pressure sampled there — the same lattice a discrete Coulomb solver
+    # meshes the contact into, no hand-rolled half-ellipsoid.
+    mesh = cap.mesh
+    gx, gy = np.meshgrid(mesh.x, mesh.y, indexing="ij")
+    field = ax.pcolormesh(gx * MM, gy * MM, MU * mesh.pressure * GPA, cmap="magma", shading="auto")
+    plt.colorbar(field, ax=ax, label=r"$\mu\,p$ (GPa)", fraction=0.046, pad=0.04)
 
     # The solver's contact outline (where its pressure clears the contact floor).
     ax.contour(
@@ -553,6 +556,12 @@ def main() -> None:
         f"  separated footprint integrates to Q_+ + Q_- = {cap.load_integral:.2f} N "
         f"(coupled Q_+ = {cap.q_plus:.2f} N)  ->  full-sliding friction mu Q = "
         f"{MU * cap.load_integral:.2f} N"
+    )
+    nx_mesh, ny_mesh = cap.mesh.shape
+    print(
+        f"  pressure_mesh({nx_mesh}x{ny_mesh}) per-cell normal loads sum to "
+        f"{cap.mesh.total_force:.2f} N  ->  Coulomb cap mu*force sums to "
+        f"{MU * cap.mesh.total_force:.2f} N"
     )
 
     separations = np.linspace(0.35, 2.4, 9)
